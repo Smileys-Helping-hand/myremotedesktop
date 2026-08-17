@@ -1,0 +1,75 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --bg-main: #050507;
+    --bg-surface: #0a0b10;
+    --bg-surface-elevated: #10121a;
+    --cyan-accent: #00d2ff;
+    --cyan-glow: rgba(0, 210, 255, 0.15);
+  }
+
+  body {
+    background-color: #050507;
+    color: #e2e8f0;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+
+  /* Custom sleek scrollbars */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #07080c;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #1e293b;
+    border-radius: 9999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #334155;
+  }
+}
+
+.immersive-glass {
+  background: rgba(12, 14, 22, 0.75);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(0, 210, 255, 0.12);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37), inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+}
+
+.immersive-card {
+  background: rgba(10, 12, 19, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.5);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.immersive-card:hover {
+  border-color: rgba(0, 210, 255, 0.25);
+  box-shadow: 0 4px 24px -2px rgba(0, 210, 255, 0.08);
+}
+
+.glow-cyan {
+  box-shadow: 0 0 20px rgba(0, 210, 255, 0.2);
+}
+
+.glow-indigo {
+  box-shadow: 0 0 20px rgba(99, 102, 241, 0.2);
+}
+
+.glow-rose {
+  box-shadow: 0 0 20px rgba(244, 63, 94, 0.2);
+}
+
+.glow-emerald {
+  box-shadow: 0 0 20px rgba(16, 185, 129, 0.2);
+}
+
+.cyber-grid {
+  background-image: linear-gradient(to right, rgba(0, 210, 255, 0.03) 1px, transparent 1px),
+                    linear-gradient(to bottom, rgba(0, 210, 255, 0.03) 1px, transparent 1px);
+  background-size: 32px 32px;
+}

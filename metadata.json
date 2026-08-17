@@ -1,0 +1,6 @@
+{
+  "name": "RemoteDesk WebRTC Architecture Studio",
+  "description": "Architectural blueprints, coordinate translation engine, and WebRTC remote control simulation workbench.",
+  "requestFramePermissions": ["display-capture"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
