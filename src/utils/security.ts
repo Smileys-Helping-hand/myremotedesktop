@@ -119,11 +119,25 @@ export async function generatePinForWindow(
     ['sign']
   );
 
-  // 8-byte big-endian counter
-  const counter = new ArrayBuffer(8);
-  const view = new DataView(counter);
-  view.setUint32(0, Math.floor(timeWindow / 2 ** 32));
-  view.setUint32(4, timeWindow >>> 0);
+  // 8-byte big-endian counter.
+  //
+  // Written into a Uint8Array rather than handed to `sign` as a bare
+  // ArrayBuffer: some WebCrypto implementations reject an ArrayBuffer that
+  // originated in another realm — which is what jsdom hands us — with
+  // "3rd argument is not instance of ArrayBuffer, Buffer, TypedArray, or
+  // DataView", even though it plainly is one. A typed-array view is accepted
+  // everywhere, so the bytes are filled in by hand.
+  const counter = new Uint8Array(8);
+  const high = Math.floor(timeWindow / 2 ** 32);
+  const low = timeWindow >>> 0;
+  counter[0] = (high >>> 24) & 0xff;
+  counter[1] = (high >>> 16) & 0xff;
+  counter[2] = (high >>> 8) & 0xff;
+  counter[3] = high & 0xff;
+  counter[4] = (low >>> 24) & 0xff;
+  counter[5] = (low >>> 16) & 0xff;
+  counter[6] = (low >>> 8) & 0xff;
+  counter[7] = low & 0xff;
 
   const signature = new Uint8Array(await subtle.sign('HMAC', key, counter));
 

@@ -151,3 +151,33 @@ describe('capability probe', () => {
     expect(isPinSupported()).toBe(typeof globalThis.crypto?.subtle !== 'undefined');
   });
 });
+
+/**
+ * Known-answer tests from RFC 6238 Appendix B (the SHA-256 column).
+ *
+ * Every other test here is self-referential — it generates a code and compares
+ * it against another generated code — so an implementation that was internally
+ * consistent but wrong would sail through them all. These vectors are the only
+ * thing that pins the output to the actual standard.
+ */
+describe('RFC 6238 conformance', () => {
+  // The RFC's shared secret is the ASCII string below; ours are base32.
+  const RFC_SECRET = base32Encode(
+    new TextEncoder().encode('12345678901234567890123456789012')
+  );
+  const STEP = 30;
+
+  const vectors: Array<[unixSeconds: number, expected: string]> = [
+    [59, '46119246'],
+    [1_111_111_109, '68084774'],
+    [1_111_111_111, '67062674'],
+    [1_234_567_890, '91819424'],
+    [2_000_000_000, '90698825'],
+    [20_000_000_000, '77737706'],
+  ];
+
+  it.each(vectors)('T=%i produces %s', async (unixSeconds, expected) => {
+    const window = Math.floor(unixSeconds / STEP);
+    expect(await generatePinForWindow(RFC_SECRET, window, 8)).toBe(expected);
+  });
+});
