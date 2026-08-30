@@ -1,0 +1,17 @@
+{
+  "name": "RemoteDesk",
+  "short_name": "RemoteDesk",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#070a13",
+  "theme_color": "#06b6d4",
+  "description": "High-Performance Low-Latency AnyDesk-Style WebRTC Remote Desktop",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -4,11 +4,8 @@ import {
   Check,
   Copy,
   Send,
-  Shield,
-  RefreshCw,
   Eye,
   EyeOff,
-  Sparkles,
 } from 'lucide-react';
 
 interface ClipboardSyncCardProps {

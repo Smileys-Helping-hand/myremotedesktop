@@ -1,9 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { io, Socket } from 'socket.io-client';
+import { io, Socket } from '../utils/signaling';
 import {
   RemoteControlPacket,
   RemoteMouseMovePayload,
-  SignalingMessage,
 } from '../types/remoteControl';
 
 export interface WebRTCOptions {
@@ -11,6 +10,8 @@ export interface WebRTCOptions {
   roomId?: string;
   localStream?: MediaStream | null;
   serverUrl?: string;
+  unattended?: boolean;
+  pin?: string;
   onRemotePacket?: (packet: RemoteControlPacket) => void;
   onRemoteMouse?: (packet: RemoteMouseMovePayload) => void;
   iceServers?: RTCIceServer[];
@@ -25,32 +26,36 @@ export interface WebRTCStats {
   resolution: { width: number; height: number };
 }
 
-// In-browser BroadcastChannel bus for seamless local peer testing & iframe demo
+// Local in-browser BroadcastChannel bus for testing in multiple tabs
 class LocalSignalingBus {
   private channel: BroadcastChannel | null = null;
-  private listeners: Set<(msg: SignalingMessage) => void> = new Set();
+  private listeners: Set<(msg: any) => void> = new Set();
 
   constructor() {
     if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
       try {
         this.channel = new BroadcastChannel('remotedesk_signaling_bus');
         this.channel.onmessage = (event) => {
-          const msg = event.data as SignalingMessage;
+          const msg = event.data;
           this.listeners.forEach((listener) => listener(msg));
         };
       } catch (err) {
-        console.warn('BroadcastChannel not supported or restricted:', err);
+        console.warn('BroadcastChannel not supported:', err);
       }
     }
   }
 
-  public send(msg: SignalingMessage) {
+  public send(msg: any) {
     if (this.channel) {
-      this.channel.postMessage(msg);
+      try {
+        this.channel.postMessage(msg);
+      } catch (e) {
+        // ignore clone error
+      }
     }
   }
 
-  public subscribe(listener: (msg: SignalingMessage) => void) {
+  public subscribe(listener: (msg: any) => void) {
     this.listeners.add(listener);
     return () => {
       this.listeners.delete(listener);
@@ -60,21 +65,130 @@ class LocalSignalingBus {
 
 const localSignaling = new LocalSignalingBus();
 
-const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
+/**
+ * STUN servers used to discover this peer's public address.
+ *
+ * STUN alone is enough for the large majority of internet sessions: two peers
+ * behind ordinary home routers can hole-punch a direct path once each knows its
+ * own reflexive address, and the media then flows peer-to-peer.
+ *
+ * There is deliberately **no TURN server in this list**. TURN relays the actual
+ * video, so it needs a server with a public IP and real bandwidth; the free
+ * public relays that used to be pasted into projects like this one no longer
+ * accept anonymous allocations, and shipping credentials that fail is worse
+ * than shipping none — it looks like relay coverage exists when it does not.
+ * `remotedesk_ice_servers` in localStorage overrides this whole list; see
+ * `getCustomIceServers`, and the README for standing one up.
+ */
+export const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
   { urls: 'stun:stun2.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
 ];
+
+/**
+ * Origin of the signaling server this app embeds, once resolved at startup.
+ *
+ * Cached at module scope so the URL getters can stay synchronous — the Tauri
+ * command that reports it is async, and `useWebRTC` needs a URL at first render.
+ */
+/** Port the embedded server and the standalone relay both start from. */
+const DEFAULT_SIGNAL_PORT = 4000;
+/** Vite's dev server serves the frontend only; signaling lives elsewhere. */
+const VITE_DEV_PORT = '1420';
+
+let embeddedSignalUrl: string | null = null;
+
+/** Called once during boot with the embedded server origin, or `null`. */
+export function setEmbeddedSignalUrl(url: string | null): void {
+  embeddedSignalUrl = url;
+}
+
+/**
+ * Last-resort guess when no server has been chosen explicitly.
+ *
+ * A page served over http(s) was almost certainly served *by* a signaling
+ * server — the host's embedded one, the standalone relay, or a quick tunnel —
+ * so the origin it came from is the right place to signal back to. Taking the
+ * whole origin rather than rebuilding it keeps the actual port (the embedded
+ * server scans upward from 4000 when the port is taken, and the relay honours
+ * `SIGNAL_PORT`) and the actual scheme, which matters over an https tunnel
+ * where forcing `http:` would be blocked as mixed content.
+ *
+ * Two origins are not servers and fall back to the default port: Tauri's custom
+ * protocol, and the Vite dev server, which only serves the frontend.
+ */
+function originSignalUrl(): string {
+  const { protocol, origin, hostname, port } = window.location;
+  const isHttp = protocol === 'http:' || protocol === 'https:';
+  if (isHttp && port !== VITE_DEV_PORT) return origin;
+  return `http://${hostname || 'localhost'}:${DEFAULT_SIGNAL_PORT}`;
+}
+
+/**
+ * Signaling origin for *joining* a session. A URL the operator typed in the
+ * client wins, because the client must meet the host on the host's server.
+ */
+export function getDefaultSignalUrl(): string {
+  if (typeof window === 'undefined') return `http://localhost:${DEFAULT_SIGNAL_PORT}`;
+  const saved = localStorage.getItem('remotedesk_signal_url');
+  if (saved) return saved;
+  if (embeddedSignalUrl) return embeddedSignalUrl;
+  return originSignalUrl();
+}
+
+/**
+ * Signaling origin for *hosting* a session — always this machine's own server.
+ *
+ * A URL saved from a previous outbound connection must not redirect our own
+ * hosting to someone else's rendezvous point: the room would be registered on a
+ * server no client of ours is looking at, and the session would simply never
+ * connect with nothing to explain why.
+ *
+ * The origin is therefore consulted *before* the saved URL, not after. That
+ * ordering matters on Linux, where the host UI runs as a browser page served by
+ * the embedded server: there is no Tauri IPC to report the server's address, so
+ * `embeddedSignalUrl` is null and the serving origin is the only correct
+ * answer available.
+ */
+export function getHostSignalUrl(): string {
+  if (typeof window === 'undefined') return `http://localhost:${DEFAULT_SIGNAL_PORT}`;
+  if (embeddedSignalUrl) return embeddedSignalUrl;
+
+  const { protocol, port } = window.location;
+  const servedByASignalingServer =
+    (protocol === 'http:' || protocol === 'https:') && port !== VITE_DEV_PORT;
+  if (servedByASignalingServer) return window.location.origin;
+
+  const saved = localStorage.getItem('remotedesk_signal_url');
+  if (saved) return saved;
+  return originSignalUrl();
+}
+
+export function getCustomIceServers(): RTCIceServer[] {
+  if (typeof window === 'undefined') return DEFAULT_ICE_SERVERS;
+  try {
+    const saved = localStorage.getItem('remotedesk_ice_servers');
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch {}
+  return DEFAULT_ICE_SERVERS;
+}
 
 export function useWebRTC(options: WebRTCOptions = {}) {
   const {
     role: initialRole,
     roomId: initialRoomId,
     localStream,
-    serverUrl = typeof window !== 'undefined' ? window.location.origin : '',
+    serverUrl = getDefaultSignalUrl(),
+    unattended = true,
+    pin: initialPin,
     onRemotePacket,
     onRemoteMouse,
-    iceServers = DEFAULT_ICE_SERVERS,
+    iceServers = getCustomIceServers(),
   } = options;
 
   // State
@@ -85,6 +199,7 @@ export function useWebRTC(options: WebRTCOptions = {}) {
   const [iceConnectionState, setIceConnectionState] = useState<RTCIceConnectionState>('new');
   const [signalingState, setSignalingState] = useState<RTCSignalingState>('stable');
   const [isSocketConnected, setIsSocketConnected] = useState<boolean>(false);
+  const [joinError, setJoinError] = useState<string | null>(null);
   const [dataChannelsReady, setDataChannelsReady] = useState<{ mouse: boolean; events: boolean }>({
     mouse: false,
     events: false,
@@ -102,9 +217,10 @@ export function useWebRTC(options: WebRTCOptions = {}) {
   const [lastReceivedMousePacket, setLastReceivedMousePacket] = useState<RemoteMouseMovePayload | null>(null);
   const [lastReceivedEventPacket, setLastReceivedEventPacket] = useState<RemoteControlPacket | null>(null);
 
-  // References to prevent memory leaks and unnecessary re-creations
+  // References
   const roleRef = useRef<'host' | 'client' | null>(initialRole || null);
   const roomIdRef = useRef<string | null>(initialRoomId || null);
+  const remotePeerIdRef = useRef<string | null>(null);
   const onRemotePacketRef = useRef(onRemotePacket);
   const onRemoteMouseRef = useRef(onRemoteMouse);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
@@ -115,8 +231,10 @@ export function useWebRTC(options: WebRTCOptions = {}) {
   const localClientIdRef = useRef<string>(`peer_${Math.random().toString(36).substring(2, 9)}`);
   const iceCandidatesQueueRef = useRef<RTCIceCandidateInit[]>([]);
   const statsIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const unattendedRef = useRef<boolean>(unattended);
+  const pinRef = useRef<string | undefined>(initialPin);
 
-  // Mutable packet counters to avoid 120Hz React state churn
+  // Mutable packet counters
   const packetsSentRef = useRef<number>(0);
   const packetsReceivedRef = useRef<number>(0);
 
@@ -130,6 +248,14 @@ export function useWebRTC(options: WebRTCOptions = {}) {
   }, [roomId]);
 
   useEffect(() => {
+    unattendedRef.current = unattended;
+  }, [unattended]);
+
+  useEffect(() => {
+    pinRef.current = initialPin;
+  }, [initialPin]);
+
+  useEffect(() => {
     onRemotePacketRef.current = onRemotePacket;
   }, [onRemotePacket]);
 
@@ -137,18 +263,24 @@ export function useWebRTC(options: WebRTCOptions = {}) {
     onRemoteMouseRef.current = onRemoteMouse;
   }, [onRemoteMouse]);
 
-  // Sync localStream reference
+  // Sync localStream reference and update active peer connection tracks
   useEffect(() => {
     localStreamRef.current = localStream || null;
-    if (peerConnectionRef.current && localStream) {
-      // Add or replace tracks
-      const senders = peerConnectionRef.current.getSenders();
+    const pc = peerConnectionRef.current;
+    if (pc && localStream) {
+      const senders = pc.getSenders();
       localStream.getTracks().forEach((track) => {
         const existingSender = senders.find((s) => s.track?.kind === track.kind);
         if (existingSender) {
-          existingSender.replaceTrack(track);
+          existingSender.replaceTrack(track).catch((err) => {
+            console.warn('[WebRTC] replaceTrack error:', err);
+          });
         } else {
-          peerConnectionRef.current?.addTrack(track, localStream);
+          try {
+            pc.addTrack(track, localStream);
+          } catch (e) {
+            // track already added
+          }
         }
       });
     }
@@ -171,7 +303,7 @@ export function useWebRTC(options: WebRTCOptions = {}) {
           mouseChannelRef.current.close();
         }
       } catch (e) {
-        // Ignore close errors
+        // ignore
       }
       mouseChannelRef.current = null;
     }
@@ -186,7 +318,7 @@ export function useWebRTC(options: WebRTCOptions = {}) {
           eventsChannelRef.current.close();
         }
       } catch (e) {
-        // Ignore close errors
+        // ignore
       }
       eventsChannelRef.current = null;
     }
@@ -201,7 +333,7 @@ export function useWebRTC(options: WebRTCOptions = {}) {
       try {
         peerConnectionRef.current.close();
       } catch (e) {
-        // Ignore close errors
+        // ignore
       }
       peerConnectionRef.current = null;
     }
@@ -213,20 +345,44 @@ export function useWebRTC(options: WebRTCOptions = {}) {
     setDataChannelsReady({ mouse: false, events: false });
   }, []);
 
-  // Send Signaling Message over Socket.io and BroadcastChannel fallback
+  // Send Signaling Message
   const sendSignalingMessage = useCallback(
-    (msg: SignalingMessage) => {
-      // 1. Socket.io
-      if (socketRef.current && socketRef.current.connected) {
-        socketRef.current.emit(msg.type, msg);
+    (msg: {
+      type: 'offer' | 'answer' | 'ice-candidate' | 'peer-joined' | 'peer-left' | 'leave';
+      roomId?: string;
+      targetId?: string;
+      senderId?: string;
+      data?: any;
+    }) => {
+      const socket = socketRef.current;
+      const targetRoomId = msg.roomId || roomIdRef.current || '';
+      const payload = {
+        ...msg,
+        roomId: targetRoomId,
+        senderId: localClientIdRef.current,
+        targetId: msg.targetId || remotePeerIdRef.current,
+      };
+
+      if (socket && socket.connected) {
+        // Send via unified signal event
+        if (msg.type === 'offer' || msg.type === 'answer' || msg.type === 'ice-candidate') {
+          socket.emit('signal', {
+            targetId: payload.targetId,
+            kind: msg.type,
+            data: msg.data,
+          });
+        }
+        // Also emit directly for full backward compatibility
+        socket.emit(msg.type, payload);
       }
-      // 2. BroadcastChannel local bus
-      localSignaling.send(msg);
+
+      // BroadcastChannel local bus fallback
+      localSignaling.send(payload);
     },
     []
   );
 
-  // Setup Data Channel event listeners with zero-allocation message pipeline
+  // Setup Data Channel event listeners
   const setupDataChannelEvents = useCallback(
     (channel: RTCDataChannel, type: 'mouse' | 'events') => {
       channel.onopen = () => {
@@ -279,7 +435,7 @@ export function useWebRTC(options: WebRTCOptions = {}) {
 
       const pc = new RTCPeerConnection({
         iceServers,
-        iceCandidatePoolSize: 2,
+        iceCandidatePoolSize: 4,
       });
       peerConnectionRef.current = pc;
 
@@ -302,7 +458,7 @@ export function useWebRTC(options: WebRTCOptions = {}) {
           sendSignalingMessage({
             type: 'ice-candidate',
             roomId: targetRoomId,
-            senderId: localClientIdRef.current,
+            targetId: remotePeerIdRef.current || undefined,
             data: event.candidate.toJSON(),
           });
         }
@@ -325,11 +481,15 @@ export function useWebRTC(options: WebRTCOptions = {}) {
         }
       };
 
-      // If HOST: Add local media stream and create the two data channels
+      // If HOST: Add local media stream and create data channels
       if (currentRole === 'host') {
         if (localStreamRef.current) {
           localStreamRef.current.getTracks().forEach((track) => {
-            pc.addTrack(track, localStreamRef.current!);
+            try {
+              pc.addTrack(track, localStreamRef.current!);
+            } catch (e) {
+              // ignore
+            }
           });
         }
 
@@ -399,21 +559,48 @@ export function useWebRTC(options: WebRTCOptions = {}) {
     [cleanupPeerConnection, iceServers, sendSignalingMessage, setupDataChannelEvents]
   );
 
-  // Handle Incoming Signaling Message (stable across role/roomId state changes via refs)
-  const handleSignalingMessage = useCallback(
-    async (msg: SignalingMessage) => {
-      // Ignore our own messages or messages for other rooms
-      if (msg.senderId === localClientIdRef.current) return;
+  // Helper: Flush queued ICE candidates
+  const drainIceCandidates = async (pc: RTCPeerConnection) => {
+    while (iceCandidatesQueueRef.current.length > 0) {
+      const candidate = iceCandidatesQueueRef.current.shift();
+      if (candidate) {
+        try {
+          await pc.addIceCandidate(candidate);
+        } catch (e) {
+          console.warn('[WebRTC] Error adding queued ICE candidate:', e);
+        }
+      }
+    }
+  };
+
+  // Handle incoming signaling message
+  const handleSignaling = useCallback(
+    async (kind: string, payload: any) => {
       const currentRoomId = roomIdRef.current;
       const currentRole = roleRef.current;
-      if (currentRoomId && msg.roomId !== currentRoomId) return;
+      const data = payload?.data ?? payload;
+      const senderId = payload?.fromId || payload?.senderId;
 
-      const pc = peerConnectionRef.current;
+      if (senderId && senderId === localClientIdRef.current) return;
+      if (payload?.roomId && currentRoomId && payload.roomId !== currentRoomId) return;
 
-      switch (msg.type) {
-        case 'peer-joined': {
-          // If we are Host and a Client joined, initiate WebRTC Offer
-          if (currentRole === 'host' && pc) {
+      if (senderId) {
+        remotePeerIdRef.current = senderId;
+      }
+
+      let pc = peerConnectionRef.current;
+
+      switch (kind) {
+        case 'peer-joined':
+        case 'peer:joined': {
+          const peerId = payload?.peerId || senderId;
+          if (peerId) remotePeerIdRef.current = peerId;
+
+          // If HOST and Client joined, initiate WebRTC Offer
+          if (currentRole === 'host') {
+            if (!pc) {
+              pc = createPeerConnection(currentRoomId || 'default', 'host');
+            }
             try {
               const offer = await pc.createOffer({
                 offerToReceiveVideo: false,
@@ -422,72 +609,62 @@ export function useWebRTC(options: WebRTCOptions = {}) {
               await pc.setLocalDescription(offer);
               sendSignalingMessage({
                 type: 'offer',
-                roomId: msg.roomId,
-                senderId: localClientIdRef.current,
+                roomId: currentRoomId || undefined,
+                targetId: peerId,
                 data: offer,
               });
             } catch (err) {
-              console.error('Failed to create offer:', err);
+              console.error('[WebRTC] Failed to create offer:', err);
             }
           }
           break;
         }
 
         case 'offer': {
-          // If we are Client, receive Offer and generate Answer
           if (currentRole === 'client') {
             try {
-              const currentPc = pc || createPeerConnection(msg.roomId, 'client');
-              await currentPc.setRemoteDescription(new RTCSessionDescription(msg.data));
-
-              // Process any queued ICE candidates
-              while (iceCandidatesQueueRef.current.length > 0) {
-                const candidate = iceCandidatesQueueRef.current.shift();
-                if (candidate) await currentPc.addIceCandidate(candidate);
+              if (!pc) {
+                pc = createPeerConnection(currentRoomId || 'default', 'client');
               }
+              await pc.setRemoteDescription(new RTCSessionDescription(data));
+              await drainIceCandidates(pc);
 
-              const answer = await currentPc.createAnswer();
-              await currentPc.setLocalDescription(answer);
+              const answer = await pc.createAnswer();
+              await pc.setLocalDescription(answer);
 
               sendSignalingMessage({
                 type: 'answer',
-                roomId: msg.roomId,
-                senderId: localClientIdRef.current,
+                roomId: currentRoomId || undefined,
+                targetId: senderId,
                 data: answer,
               });
             } catch (err) {
-              console.error('Failed to handle offer:', err);
+              console.error('[WebRTC] Failed to handle offer:', err);
             }
           }
           break;
         }
 
         case 'answer': {
-          // Host receives Answer from Client
           if (currentRole === 'host' && pc) {
             try {
-              await pc.setRemoteDescription(new RTCSessionDescription(msg.data));
-
-              // Process any queued ICE candidates
-              while (iceCandidatesQueueRef.current.length > 0) {
-                const candidate = iceCandidatesQueueRef.current.shift();
-                if (candidate) await pc.addIceCandidate(candidate);
-              }
+              await pc.setRemoteDescription(new RTCSessionDescription(data));
+              await drainIceCandidates(pc);
             } catch (err) {
-              console.error('Failed to set remote description answer:', err);
+              console.error('[WebRTC] Failed to set remote answer:', err);
             }
           }
           break;
         }
 
         case 'ice-candidate': {
-          if (msg.data) {
-            const candidate = new RTCIceCandidate(msg.data);
+          if (data) {
+            const candidate = new RTCIceCandidate(data);
             if (pc && pc.remoteDescription && pc.remoteDescription.type) {
               try {
                 await pc.addIceCandidate(candidate);
               } catch (err) {
-                console.error('Error adding ICE candidate:', err);
+                console.warn('[WebRTC] Error adding ICE candidate:', err);
               }
             } else {
               iceCandidatesQueueRef.current.push(candidate);
@@ -496,7 +673,9 @@ export function useWebRTC(options: WebRTCOptions = {}) {
           break;
         }
 
-        case 'peer-left': {
+        case 'peer-left':
+        case 'peer:left':
+        case 'session:ended': {
           setRemoteStream(null);
           setConnectionState('disconnected');
           break;
@@ -506,124 +685,199 @@ export function useWebRTC(options: WebRTCOptions = {}) {
     [createPeerConnection, sendSignalingMessage]
   );
 
-  // Initialize Socket.io connection & LocalSignaling listener once
+  // Initialize the signaling connection
   useEffect(() => {
     let socket: Socket | null = null;
     try {
       socket = io(serverUrl, {
-        transports: ['websocket', 'polling'],
         autoConnect: true,
-        reconnectionAttempts: 10,
+        reconnectionAttempts: 20,
         reconnectionDelay: 1000,
+        timeout: 8000,
       });
 
       socket.on('connect', () => {
         setIsSocketConnected(true);
+        setJoinError(null);
+        // If joinRoom or host room was requested, emit immediately upon connection!
+        if (roomIdRef.current) {
+          if (roleRef.current === 'host') {
+            socket?.emit('host:create', {
+              roomId: roomIdRef.current,
+              unattended: unattendedRef.current,
+              pin: pinRef.current,
+            });
+          } else if (roleRef.current === 'client') {
+            socket?.emit('client:join', {
+              roomId: roomIdRef.current,
+              pin: pinRef.current,
+            });
+          }
+        }
+      });
+
+      socket.on('connect_error', (err) => {
+        console.warn(`[WebRTC] Socket connect_error to ${serverUrl}:`, err);
+        setIsSocketConnected(false);
+        setJoinError(`Cannot reach signaling server at ${serverUrl}`);
       });
 
       socket.on('disconnect', () => {
         setIsSocketConnected(false);
       });
 
-      socket.on('offer', (data) => handleSignalingMessage(data));
-      socket.on('answer', (data) => handleSignalingMessage(data));
-      socket.on('ice-candidate', (data) => handleSignalingMessage(data));
-      socket.on('peer-joined', (data) => handleSignalingMessage(data));
-      socket.on('peer-left', (data) => handleSignalingMessage(data));
+      // Unified signal relay listener
+      socket.on('signal', ({ fromId, kind, data }: { fromId: string; kind: string; data: any }) => {
+        handleSignaling(kind, { fromId, data });
+      });
+
+      // Specific event listeners
+      socket.on('offer', (data) => handleSignaling('offer', data));
+      socket.on('answer', (data) => handleSignaling('answer', data));
+      socket.on('ice-candidate', (data) => handleSignaling('ice-candidate', data));
+      socket.on('peer-joined', (data) => handleSignaling('peer-joined', data));
+      socket.on('peer:joined', (data) => handleSignaling('peer:joined', data));
+      socket.on('peer:left', (data) => handleSignaling('peer:left', data));
+      socket.on('session:ended', (data) => handleSignaling('session:ended', data));
+
+      // Host receives join request
+      socket.on('peer:join-request', ({ requestId, pin }: { requestId: string; peerId: string; pin: string }) => {
+        // Auto-approve if unattended mode is on or PIN matches
+        const isAuthorized = unattendedRef.current || !pinRef.current || pinRef.current === pin?.trim().toUpperCase();
+        socket?.emit('host:auth-result', {
+          requestId,
+          granted: isAuthorized,
+          reason: isAuthorized ? undefined : 'Invalid PIN',
+        });
+      });
+
+      // Client receives join verdict
+      socket.on('join:result', (res: { granted: boolean; roomId?: string; hostId?: string; peerId?: string; reason?: string }) => {
+        if (res.granted) {
+          setJoinError(null);
+          if (res.hostId) {
+            remotePeerIdRef.current = res.hostId;
+          }
+        } else {
+          setJoinError(res.reason || 'Join request rejected');
+          setConnectionState('failed');
+        }
+      });
 
       socketRef.current = socket;
     } catch (err) {
-      console.warn('Socket.io connection initialization error (using local bus fallback):', err);
+      console.warn('Signaling connection initialization error:', err);
     }
 
-    // Subscribe to local BroadcastChannel bus fallback
+    // Subscribe to local BroadcastChannel fallback
     const unsubscribeLocal = localSignaling.subscribe((msg) => {
-      handleSignalingMessage(msg);
+      handleSignaling(msg.type || msg.kind, msg);
     });
 
     return () => {
       if (socket) {
-        socket.off('connect');
-        socket.off('disconnect');
-        socket.off('offer');
-        socket.off('answer');
-        socket.off('ice-candidate');
-        socket.off('peer-joined');
-        socket.off('peer-left');
         socket.disconnect();
       }
       unsubscribeLocal();
     };
-  }, [handleSignalingMessage, serverUrl]);
+  }, [handleSignaling, serverUrl]);
 
-  // Join Room Action (Host or Client)
+  // Join Room Action
   const joinRoom = useCallback(
-    async (targetRoomId: string, selectedRole: 'host' | 'client', pin?: string) => {
+    async (targetRoomId: string, selectedRole: 'host' | 'client', pin?: string, isUnattended = true) => {
+      setJoinError(null);
       setRole(selectedRole);
       setRoomId(targetRoomId);
+      roleRef.current = selectedRole;
+      roomIdRef.current = targetRoomId;
+      unattendedRef.current = isUnattended;
+      pinRef.current = pin;
 
       createPeerConnection(targetRoomId, selectedRole);
 
-      // Notify signaling server / peers of join with optional rotating security PIN
+      const socket = socketRef.current;
+      if (socket) {
+        if (socket.connected) {
+          if (selectedRole === 'host') {
+            socket.emit('host:create', {
+              roomId: targetRoomId,
+              unattended: isUnattended,
+              pin: pin?.trim().toUpperCase(),
+            });
+          } else {
+            socket.emit('client:join', {
+              roomId: targetRoomId,
+              pin: pin?.trim().toUpperCase(),
+            });
+          }
+        } else {
+          socket.connect();
+        }
+      }
+
+      // Notify local bus
       sendSignalingMessage({
         type: 'peer-joined',
         roomId: targetRoomId,
         senderId: localClientIdRef.current,
-        pin: pin?.trim().toUpperCase(),
         data: { role: selectedRole, pin: pin?.trim().toUpperCase() },
       });
     },
     [createPeerConnection, sendSignalingMessage]
   );
 
-  // Emergency Panic Button: Instantly sever all connections and lock down
-  const severAllConnections = useCallback((reason: string = 'GLOBAL_PANIC_TRIGGERED') => {
-    console.warn(`[WebRTC] EMERGENCY PANIC: Severing all peer connections! Reason: ${reason}`);
-    
-    // Broadcast panic packet before severing
-    if (eventsChannelRef.current && eventsChannelRef.current.readyState === 'open') {
-      try {
-        eventsChannelRef.current.send(
-          JSON.stringify({
-            type: 'PANIC_SEVER_CONNECTION',
-            reason,
-            timestamp: Date.now(),
-          })
-        );
-      } catch (e) {
-        // Ignore send errors during emergency shutdown
+  // Emergency Panic Button
+  const severAllConnections = useCallback(
+    (reason: string = 'GLOBAL_PANIC_TRIGGERED') => {
+      console.warn(`[WebRTC] EMERGENCY PANIC: Severing all peer connections! Reason: ${reason}`);
+
+      if (eventsChannelRef.current && eventsChannelRef.current.readyState === 'open') {
+        try {
+          eventsChannelRef.current.send(
+            JSON.stringify({
+              type: 'PANIC_SEVER_CONNECTION',
+              reason,
+              timestamp: Date.now(),
+            })
+          );
+        } catch (e) {
+          // ignore
+        }
       }
-    }
 
-    const currentRoomId = roomIdRef.current;
-    if (currentRoomId) {
-      sendSignalingMessage({
-        type: 'leave',
-        roomId: currentRoomId,
-        senderId: localClientIdRef.current,
-        data: { reason },
-      });
-    }
+      const currentRoomId = roomIdRef.current;
+      if (currentRoomId) {
+        sendSignalingMessage({
+          type: 'leave',
+          roomId: currentRoomId,
+          data: { reason },
+        });
+      }
 
-    cleanupPeerConnection();
-    setRoomId(null);
-  }, [cleanupPeerConnection, sendSignalingMessage]);
+      cleanupPeerConnection();
+      setRoomId(null);
+    },
+    [cleanupPeerConnection, sendSignalingMessage]
+  );
 
-  // Leave Room Action
+  // Leave Room
   const leaveRoom = useCallback(() => {
     const currentRoomId = roomIdRef.current;
     if (currentRoomId) {
       sendSignalingMessage({
         type: 'peer-left',
         roomId: currentRoomId,
-        senderId: localClientIdRef.current,
       });
+    }
+    const socket = socketRef.current;
+    if (socket && socket.connected) {
+      socket.emit('leave');
     }
     cleanupPeerConnection();
     setRoomId(null);
   }, [cleanupPeerConnection, sendSignalingMessage]);
 
-  // Send High-Frequency Mouse Packet (Channel A: Unreliable / Unordered)
+  // Send High-Frequency Mouse Packet
   const sendMousePacket = useCallback((packet: RemoteMouseMovePayload): boolean => {
     const channel = mouseChannelRef.current;
     if (channel && channel.readyState === 'open') {
@@ -632,14 +886,13 @@ export function useWebRTC(options: WebRTCOptions = {}) {
         packetsSentRef.current += 1;
         return true;
       } catch (err) {
-        console.warn('Failed to send mouse coordinate packet:', err);
         return false;
       }
     }
     return false;
   }, []);
 
-  // Send Critical Event Packet (Channel B: Reliable / Ordered)
+  // Send Critical Event Packet
   const sendEventPacket = useCallback((packet: RemoteControlPacket): boolean => {
     const channel = eventsChannelRef.current;
     if (channel && channel.readyState === 'open') {
@@ -648,7 +901,6 @@ export function useWebRTC(options: WebRTCOptions = {}) {
         packetsSentRef.current += 1;
         return true;
       } catch (err) {
-        console.warn('Failed to send event packet:', err);
         return false;
       }
     }
@@ -662,8 +914,12 @@ export function useWebRTC(options: WebRTCOptions = {}) {
     connectionState,
     iceConnectionState,
     signalingState,
+    joinError,
     isConnected: connectionState === 'connected' || (dataChannelsReady.mouse && dataChannelsReady.events),
-    isConnecting: connectionState === 'connecting' || signalingState === 'have-local-offer' || signalingState === 'have-remote-offer',
+    isConnecting:
+      connectionState === 'connecting' ||
+      signalingState === 'have-local-offer' ||
+      signalingState === 'have-remote-offer',
     isSocketConnected,
     dataChannelsReady,
     stats,

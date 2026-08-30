@@ -1,34 +1,27 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  Monitor,
   Tv,
   Zap,
-  Shield,
-  Radio,
   Lock,
   Unlock,
   Maximize2,
   Minimize2,
   Keyboard,
-  MousePointer,
-  Activity,
   Compass,
-  CornerDownLeft,
-  Command,
-  Sliders,
-  Check,
   Power,
-  RefreshCw,
   AlertCircle,
   HardDrive,
   Clipboard,
   Send,
-  Sparkles,
-  PenTool,
-  KeyRound,
   AlertTriangle,
+  Server,
+  Settings,
+  Wifi,
+  WifiOff,
+  Search,
+  Loader2,
 } from 'lucide-react';
-import { useWebRTC } from '../hooks/useWebRTC';
+import { useWebRTC, getDefaultSignalUrl } from '../hooks/useWebRTC';
 import { calculateRemoteCoordinates, BoundingBox } from '../utils/coordinateMath';
 import {
   HostScreenMetadata,
@@ -45,8 +38,9 @@ import {
 import { useClipboardSync } from '../utils/clipboardSync';
 import { FileTransferManager, ActiveFileTransfer } from '../utils/fileTransfer';
 import { FileTransferModal } from './FileTransferModal';
-import { StreamControls, QUALITY_PROFILES } from './StreamControls';
+import { StreamControls } from './StreamControls';
 import { AnnotationCanvas, AnnotationMode } from './AnnotationCanvas';
+import { TelemetryStatsPanel } from './TelemetryStatsPanel';
 import { useToast } from './ToastSystem';
 
 interface ClientViewProps {
@@ -55,21 +49,23 @@ interface ClientViewProps {
   onSwitchToHost?: () => void;
 }
 
-export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPin, onSwitchToHost }) => {
+export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPin }) => {
   const { showToast } = useToast();
   const [roomIdInput, setRoomIdInput] = useState<string>(initialRoomId || '');
   const [pinInput, setPinInput] = useState<string>(initialPin || '');
+  const [serverUrlInput, setServerUrlInput] = useState<string>(() => getDefaultSignalUrl());
+  const [showServerSettings, setShowServerSettings] = useState<boolean>(false);
+
   const [isJoined, setIsJoined] = useState<boolean>(false);
-  const [isControlLocked, setIsControlLocked] = useState<boolean>(true); // true = remote control active
-  const [showCoordinateHUD, setShowCoordinateHUD] = useState<boolean>(true);
+  const [isControlLocked, setIsControlLocked] = useState<boolean>(true);
+  const [showCoordinateHUD, setShowCoordinateHUD] = useState<boolean>(false);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
 
-  // Phase 4: Host Emergency Panic & UAC Alerts
+  // Host Emergency Panic Alert
   const [panicAlert, setPanicAlert] = useState<string | null>(null);
-  const [isUACPaused, setIsUACPaused] = useState<boolean>(false);
 
-  // Host Screen Metadata (default 1080p, dynamically adjustable)
-  const [hostMetadata, setHostMetadata] = useState<HostScreenMetadata>({
+  // Host Screen Metadata
+  const [hostMetadata] = useState<HostScreenMetadata>({
     width: 1920,
     height: 1080,
     devicePixelRatio: 1.0,
@@ -78,53 +74,100 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
   // Quality Preset
   const [currentQualityProfile, setCurrentQualityProfile] = useState<StreamQualityProfile['id']>('performance');
 
-  // Real-time Coordinate Translation State (Throttled for 60fps render loop)
+  // Real-time Coordinate Translation State
   const [lastCoordResult, setLastCoordResult] = useState<CoordinateTranslationResult | null>(null);
   const lastCoordResultRef = useRef<CoordinateTranslationResult | null>(null);
   const rafIdRef = useRef<number | null>(null);
 
-  // Clean up RAF on unmount
-  useEffect(() => {
-    return () => {
-      if (rafIdRef.current) {
-        cancelAnimationFrame(rafIdRef.current);
-      }
-    };
-  }, []);
-
-  // Phase 3: Annotation & Laser Pointer State
+  // Annotation & Laser Pointer State
   const [annotationMode, setAnnotationMode] = useState<AnnotationMode>('remote');
   const [incomingAnnotation, setIncomingAnnotation] = useState<AnnotationStrokePayload | null>(null);
 
-  // Phase 3: File Transfer State
+  // File Transfer State
   const [isFileModalOpen, setIsFileModalOpen] = useState<boolean>(false);
   const [activeTransfers, setActiveTransfers] = useState<ActiveFileTransfer[]>([]);
   const fileTransferManagerRef = useRef<FileTransferManager>(new FileTransferManager());
 
-  // Phase 3: Manual Clipboard input for demo
+  // Clipboard sync input
   const [manualClipInput, setManualClipInput] = useState('');
-
-  // Modifier Keys State
-  const [activeModifiers, setActiveModifiers] = useState<{
-    ctrl: boolean;
-    alt: boolean;
-    shift: boolean;
-    meta: boolean;
-  }>({
-    ctrl: false,
-    alt: false,
-    shift: false,
-    meta: false,
-  });
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const videoElementRef = useRef<HTMLVideoElement | null>(null);
+
+  const [isScanningLan, setIsScanningLan] = useState<boolean>(false);
+
+  // Update room ID if initialRoomId prop changes or from URL hash
+  useEffect(() => {
+    if (initialRoomId) setRoomIdInput(initialRoomId);
+    if (initialPin) setPinInput(initialPin);
+    if (typeof window !== 'undefined' && window.location.hash) {
+      const hash = window.location.hash.replace('#', '').trim();
+      if (hash) setRoomIdInput(hash);
+    }
+  }, [initialPin, initialRoomId]);
+
+  // Auto-scan local network for RemoteDesk host instances
+  const handleScanLan = async () => {
+    setIsScanningLan(true);
+    showToast({
+      title: 'Scanning Local Network...',
+      description: 'Looking for RemoteDesk host on LAN ports...',
+      type: 'info',
+      duration: 3000,
+    });
+
+    const candidates = [
+      'http://localhost:4000',
+      'http://127.0.0.1:4000',
+      'http://192.168.31.217:4000',
+      'http://192.168.1.50:4000',
+      'http://192.168.1.100:4000',
+      'http://192.168.0.100:4000',
+      'http://10.0.0.2:4000',
+    ];
+
+    let found = false;
+    for (const url of candidates) {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 1200);
+        const res = await fetch(`${url}/network-info`, { signal: controller.signal });
+        clearTimeout(timeoutId);
+        if (res.ok) {
+          setServerUrlInput(url);
+          localStorage.setItem('remotedesk_signal_url', url);
+          showToast({
+            title: 'Host Discovered!',
+            description: `Connected to host at ${url}`,
+            type: 'success',
+            duration: 4000,
+          });
+          found = true;
+          break;
+        }
+      } catch {
+        // try next candidate
+      }
+    }
+
+    if (!found) {
+      showToast({
+        title: 'No Host Auto-Detected',
+        description: 'Please type your Host PC\'s IP (e.g. http://192.168.x.x:4000) or Cloudflare URL in Server Address.',
+        type: 'warning',
+        duration: 5000,
+      });
+    }
+    setIsScanningLan(false);
+  };
 
   // WebRTC Hook
   const {
     remoteStream,
     connectionState,
+    signalingState,
     isSocketConnected,
+    joinError,
     dataChannelsReady,
     stats,
     joinRoom,
@@ -134,11 +177,12 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
     getDataChannelBufferedAmount,
   } = useWebRTC({
     role: 'client',
-    roomId: isJoined ? roomIdInput : undefined,
+    serverUrl: serverUrlInput,
     onRemotePacket: (packet) => handleIncomingPacket(packet),
+    onRemoteMouse: () => {},
   });
 
-  // Phase 3: Clipboard Synchronization
+  // Clipboard Synchronization
   const {
     lastSyncText,
     syncCount,
@@ -154,7 +198,7 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
     },
   });
 
-  // Wire up FileTransferManager callbacks
+  // Wire up FileTransferManager
   useEffect(() => {
     fileTransferManagerRef.current.setCallbacks(
       (packet) => sendEventPacket(packet),
@@ -163,18 +207,13 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
     );
   }, [getDataChannelBufferedAmount, sendEventPacket]);
 
-  // Handle incoming remote packets on client side
+  // Ingress packets on client
   const handleIncomingPacket = useCallback(
     (packet: RemoteControlPacket) => {
       if (packet.type === 'PANIC_SEVER_CONNECTION') {
-        setPanicAlert(packet.reason || 'Host initiated emergency panic severance.');
+        setPanicAlert(packet.reason || 'Host initiated emergency disconnect.');
         setIsJoined(false);
         leaveRoom();
-        return;
-      }
-
-      if (packet.type === 'HOST_UAC_PAUSED') {
-        setIsUACPaused(packet.isPaused);
         return;
       }
 
@@ -201,32 +240,85 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
 
   // Attach Remote Stream to Video Element
   useEffect(() => {
-    if (videoElementRef.current && remoteStream) {
-      videoElementRef.current.srcObject = remoteStream;
+    const video = videoElementRef.current;
+    if (video && remoteStream) {
+      video.srcObject = remoteStream;
+      video.play().catch((e) => {
+        console.warn('[ClientView] Autoplay blocked, waiting for user interaction:', e);
+      });
     }
   }, [remoteStream]);
 
-  // Handle Room Join Action
+  // Clean up RAF on unmount
+  useEffect(() => {
+    return () => {
+      if (rafIdRef.current) {
+        cancelAnimationFrame(rafIdRef.current);
+      }
+    };
+  }, []);
+
+  // Handle Room Join
   const handleJoin = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    const cleanRoomId = roomIdInput.trim();
-    if (!cleanRoomId || cleanRoomId.length < 4) {
+    let cleanRoomId = roomIdInput.replace(/\s+/g, '').trim();
+    let currentServer = serverUrlInput.trim();
+
+    // Auto-detect if user pasted a full URL or ID@Server into Desk ID box
+    if (cleanRoomId.includes('http://') || cleanRoomId.includes('https://')) {
+      try {
+        const url = new URL(cleanRoomId);
+        if (url.hash) {
+          cleanRoomId = url.hash.replace('#', '').trim();
+        } else if (url.pathname && url.pathname.length > 1) {
+          cleanRoomId = url.pathname.replace('/', '').trim();
+        } else {
+          cleanRoomId = '784920';
+        }
+        currentServer = `${url.protocol}//${url.host}`;
+        setServerUrlInput(currentServer);
+        setRoomIdInput(cleanRoomId);
+      } catch {
+        // ignore parse error
+      }
+    } else if (cleanRoomId.includes('@')) {
+      const [idPart, hostPart] = cleanRoomId.split('@');
+      cleanRoomId = idPart.trim();
+      currentServer = hostPart.startsWith('http') ? hostPart.trim() : `http://${hostPart.trim()}`;
+      setServerUrlInput(currentServer);
+      setRoomIdInput(cleanRoomId);
+    }
+
+    if (!cleanRoomId || cleanRoomId.length < 3) {
       showToast({
-        title: 'Invalid Session ID',
-        description: 'Please enter a valid 6-digit Session ID.',
+        title: 'Invalid Desk ID',
+        description: 'Please enter a valid 6-digit Desk ID (e.g. 559 346).',
         type: 'warning',
       });
       return;
     }
 
+    // Save server URL preference
+    localStorage.setItem('remotedesk_signal_url', currentServer);
+
+    if (!isSocketConnected) {
+      showToast({
+        title: 'Reaching Server...',
+        description: `Connecting to ${currentServer}... If this stays connecting, ensure Server Address is set to your Windows PC's IP or Cloudflare URL.`,
+        type: 'warning',
+        duration: 6000,
+      });
+    } else {
+      showToast({
+        title: 'Connecting to Host',
+        description: `Negotiating WebRTC stream with Desk ${cleanRoomId}...`,
+        type: 'info',
+        duration: 3000,
+      });
+    }
+
     setPanicAlert(null);
-    showToast({
-      title: 'Connecting to Host',
-      description: `Joining session ${cleanRoomId}...`,
-      type: 'info',
-      duration: 3000,
-    });
-    await joinRoom(cleanRoomId, 'client', pinInput.trim().toUpperCase());
+    await joinRoom(cleanRoomId, 'client', pinInput.trim().toUpperCase(), false);
     setIsJoined(true);
   };
 
@@ -235,15 +327,18 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
     leaveRoom();
     setIsJoined(false);
     setLastCoordResult(null);
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    }
     showToast({
-      title: 'Session Disconnected',
-      description: 'WebRTC P2P channels closed.',
+      title: 'Disconnected',
+      description: 'Remote session ended.',
       type: 'info',
       duration: 3000,
     });
   };
 
-  // Extract Bounding Box of the Container / Video
+  // Extract Bounding Box
   const getVideoBoundingBox = useCallback((): BoundingBox | null => {
     const el = videoElementRef.current || containerRef.current;
     if (!el) return null;
@@ -256,7 +351,7 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
     };
   }, []);
 
-  // 1. Mouse Move Pipeline (High-frequency 120Hz zero-latency stream)
+  // 1. Mouse Move Pipeline
   const handleMouseMove = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       if (!isControlLocked || annotationMode !== 'remote') return;
@@ -266,7 +361,6 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
       const result = calculateRemoteCoordinates(e.clientX, e.clientY, bbox, hostMetadata);
       lastCoordResultRef.current = result;
 
-      // Throttle React state HUD update to display refresh rate
       if (showCoordinateHUD) {
         if (rafIdRef.current === null) {
           rafIdRef.current = requestAnimationFrame(() => {
@@ -278,7 +372,6 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
         }
       }
 
-      // If pointer is inside active letterboxed area, send over channel-mouse (Unreliable 0ms UDP)
       if (!result.isOutOfBounds) {
         const packet: RemoteMouseMovePayload = {
           type: 'MOUSE_MOVE',
@@ -292,11 +385,12 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
     [annotationMode, getVideoBoundingBox, hostMetadata, isControlLocked, sendMousePacket, showCoordinateHUD]
   );
 
-  // 2. Mouse Down Pipeline (Clicks)
+  // 2. Mouse Down Pipeline
   const handleMouseDown = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       if (!isControlLocked || annotationMode !== 'remote') return;
       e.preventDefault();
+      containerRef.current?.focus();
 
       const bbox = getVideoBoundingBox();
       if (!bbox) return;
@@ -352,13 +446,13 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
     [annotationMode, getVideoBoundingBox, hostMetadata, isControlLocked, sendEventPacket]
   );
 
-  // 4. Context Menu (Prevent local right click browser menu)
+  // 4. Prevent Context Menu
   const handleContextMenu = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     e.preventDefault();
     e.stopPropagation();
   }, []);
 
-  // 5. Mouse Wheel Pipeline
+  // 5. Mouse Wheel
   const handleWheel = useCallback(
     (e: React.WheelEvent<HTMLDivElement>) => {
       if (!isControlLocked || annotationMode !== 'remote') return;
@@ -376,7 +470,7 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
     [annotationMode, isControlLocked, sendEventPacket]
   );
 
-  // 6. Keyboard Down & Up Pipeline
+  // 6. Keyboard Down & Up
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLDivElement>) => {
       if (!isControlLocked || annotationMode !== 'remote') return;
@@ -385,7 +479,7 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
         e.key === 'Tab' ||
         e.key === 'Alt' ||
         e.key === 'Meta' ||
-        (e.ctrlKey && (e.key === 'w' || e.key === 'r' || e.key === 't'))
+        (e.ctrlKey && (e.key === 'w' || e.key === 'r' || e.key === 't' || e.key === 'f'))
       ) {
         e.preventDefault();
       }
@@ -394,16 +488,16 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
         type: 'KEY_DOWN',
         key: e.key,
         code: e.code,
-        ctrlKey: e.ctrlKey || activeModifiers.ctrl,
-        altKey: e.altKey || activeModifiers.alt,
-        shiftKey: e.shiftKey || activeModifiers.shift,
-        metaKey: e.metaKey || activeModifiers.meta,
+        ctrlKey: e.ctrlKey,
+        altKey: e.altKey,
+        shiftKey: e.shiftKey,
+        metaKey: e.metaKey,
         timestamp: Date.now(),
       };
 
       sendEventPacket(packet);
     },
-    [activeModifiers, annotationMode, isControlLocked, sendEventPacket]
+    [annotationMode, isControlLocked, sendEventPacket]
   );
 
   const handleKeyUp = useCallback(
@@ -415,48 +509,19 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
         type: 'KEY_UP',
         key: e.key,
         code: e.code,
-        ctrlKey: e.ctrlKey || activeModifiers.ctrl,
-        altKey: e.altKey || activeModifiers.alt,
-        shiftKey: e.shiftKey || activeModifiers.shift,
-        metaKey: e.metaKey || activeModifiers.meta,
+        ctrlKey: e.ctrlKey,
+        altKey: e.altKey,
+        shiftKey: e.shiftKey,
+        metaKey: e.metaKey,
         timestamp: Date.now(),
       };
 
       sendEventPacket(packet);
     },
-    [activeModifiers, annotationMode, isControlLocked, sendEventPacket]
+    [annotationMode, isControlLocked, sendEventPacket]
   );
 
-  // Keyboard shortcut simulator (e.g. Ctrl+Alt+Del, Win Key, etc.)
-  const dispatchSpecialKey = (key: string, code: string, modifiers?: Partial<typeof activeModifiers>) => {
-    const packetDown: RemoteKeyboardPayload = {
-      type: 'KEY_DOWN',
-      key,
-      code,
-      ctrlKey: modifiers?.ctrl || activeModifiers.ctrl,
-      altKey: modifiers?.alt || activeModifiers.alt,
-      shiftKey: modifiers?.shift || activeModifiers.shift,
-      metaKey: modifiers?.meta || activeModifiers.meta,
-      timestamp: Date.now(),
-    };
-    sendEventPacket(packetDown);
-
-    setTimeout(() => {
-      const packetUp: RemoteKeyboardPayload = {
-        type: 'KEY_UP',
-        key,
-        code,
-        ctrlKey: modifiers?.ctrl || activeModifiers.ctrl,
-        altKey: modifiers?.alt || activeModifiers.alt,
-        shiftKey: modifiers?.shift || activeModifiers.shift,
-        metaKey: modifiers?.meta || activeModifiers.meta,
-        timestamp: Date.now(),
-      };
-      sendEventPacket(packetUp);
-    }, 80);
-  };
-
-  // Toggle Fullscreen on video element
+  // Toggle Fullscreen
   const toggleFullscreen = () => {
     if (!containerRef.current) return;
     if (!document.fullscreenElement) {
@@ -472,12 +537,6 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
     }
   };
 
-  const handleClientUploadFiles = (files: FileList) => {
-    Array.from(files).forEach((file) => {
-      fileTransferManagerRef.current.sendFile(file);
-    });
-  };
-
   const handleManualSyncClipboard = (e: React.FormEvent) => {
     e.preventDefault();
     if (!manualClipInput.trim()) return;
@@ -487,120 +546,189 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto pb-2">
-      {/* Emergency Panic Severance Alert Banner */}
+      {/* Panic Severance Alert */}
       {panicAlert && (
-        <div className="bg-rose-950/80 border-2 border-rose-500 rounded-2xl p-4 shadow-[0_0_30px_rgba(244,63,94,0.35)] backdrop-blur-xl flex items-center justify-between gap-4 animate-fadeIn">
+        <div className="bg-rose-950/90 border-2 border-rose-500 rounded-2xl p-4 shadow-[0_0_30px_rgba(244,63,94,0.35)] backdrop-blur-xl flex items-center justify-between gap-4 animate-fadeIn">
           <div className="flex items-center space-x-3 text-rose-200">
-            <div className="p-2 bg-rose-500/20 rounded-xl border border-rose-500/40 animate-pulse">
+            <div className="p-2 bg-rose-500/20 rounded-xl border border-rose-500/40">
               <AlertTriangle className="w-5 h-5 text-rose-400" />
             </div>
             <div>
-              <h4 className="font-bold text-white text-sm">Host Triggered Emergency Panic Severance</h4>
+              <h4 className="font-bold text-white text-sm">Host Ended Session</h4>
               <p className="text-xs font-mono text-rose-300">{panicAlert}</p>
             </div>
           </div>
           <button
             onClick={() => setPanicAlert(null)}
-            className="px-3.5 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-mono text-xs font-semibold transition-all shrink-0"
+            className="px-3.5 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-mono text-xs font-semibold"
           >
-            Dismiss Alert
+            Dismiss
           </button>
         </div>
       )}
 
-      {/* Windows UAC Paused Alert */}
-      {isUACPaused && (
-        <div className="bg-amber-950/80 border border-amber-500/80 rounded-2xl p-4 shadow-lg backdrop-blur-xl flex items-center gap-3 animate-fadeIn">
-          <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 animate-bounce" />
-          <div className="text-xs text-amber-200 font-mono">
-            <span className="font-bold text-white">Host in Windows Secure Desktop (UAC Prompt):</span> Stream and remote inputs are temporarily suspended until the Host dismisses the prompt.
+      {/* Join Error Banner */}
+      {joinError && (
+        <div className="bg-amber-950/80 border border-amber-500/80 rounded-2xl p-4 shadow-lg backdrop-blur-xl flex items-center justify-between gap-3 animate-fadeIn">
+          <div className="flex items-center gap-2.5 text-xs text-amber-200 font-mono">
+            <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>Connection Warning: {joinError}</span>
           </div>
+          <button
+            onClick={() => handleJoin()}
+            className="px-3 py-1 bg-amber-600/80 hover:bg-amber-500 text-white rounded-lg text-xs font-semibold"
+          >
+            Retry
+          </button>
         </div>
       )}
 
-      {/* Top Banner */}
-      <div className="bg-[#0c0e18]/90 border border-cyan-500/20 rounded-2xl p-6 shadow-[0_8px_32px_rgba(0,0,0,0.5)] backdrop-blur-xl relative overflow-hidden">
+      {/* Top Banner with AnyDesk Connect Bar */}
+      <div className="bg-[#0c0e18]/95 border border-cyan-500/25 rounded-2xl p-6 shadow-[0_8px_32px_rgba(0,0,0,0.5)] backdrop-blur-xl relative overflow-hidden">
         <div className="absolute -right-16 -top-16 w-64 h-64 bg-cyan-500/10 rounded-full blur-3xl pointer-events-none" />
-        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 relative z-10">
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-5 relative z-10">
           <div className="space-y-1.5">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 shadow-[0_0_10px_rgba(0,210,255,0.15)] flex items-center gap-1.5">
+              <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 flex items-center gap-1.5">
                 <Compass className="w-3.5 h-3.5 text-cyan-400 animate-pulse" />
-                Client Remote Controller (Phase 4)
+                Remote Controller
               </span>
               <span className="text-xs text-slate-400 font-mono">
-                Dual-Layer TOTP Auth & Zero-Latency Ingress Control
+                Sub-Millisecond Direct Control & Screen Stream
               </span>
             </div>
-            <h2 className="text-xl font-bold text-white tracking-tight flex items-center gap-2">
+            <h2 className="text-2xl font-bold text-white tracking-tight flex items-center gap-2">
               <span className="bg-gradient-to-r from-white via-cyan-100 to-cyan-300 bg-clip-text text-transparent">
-                High-Precision Remote Desktop Viewer & Control Hub
+                Connect to Remote Desk
               </span>
             </h2>
             <p className="text-sm text-slate-300 max-w-2xl leading-relaxed">
-              Connect to any Host session ID with real-time 4-character rotating PIN verification, laser pointer overlays, and sub-millisecond input control.
+              Enter the Host Desk ID below to start high-performance 60 FPS remote control.
             </p>
           </div>
 
-          {/* Quick Room Connect Form with Session ID & Rotating PIN */}
-          <form onSubmit={handleJoin} className="flex flex-wrap sm:flex-nowrap items-center gap-2 self-start lg:self-center">
+          {/* AnyDesk Style One-Click Connection Form */}
+          <form onSubmit={handleJoin} className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 self-start lg:self-center">
             <div className="flex items-center gap-2">
               <input
                 type="text"
                 id="room-id-input"
-                placeholder="6-Digit Session"
+                placeholder="Desk ID (e.g. 784 920)"
                 value={roomIdInput}
                 onChange={(e) => setRoomIdInput(e.target.value)}
-                disabled={isJoined}
-                maxLength={12}
-                className="bg-[#07080f] border border-cyan-500/30 rounded-xl px-3 py-2 text-sm font-mono text-cyan-200 placeholder-slate-500 focus:outline-none focus:border-cyan-400 w-36 tracking-widest text-center"
+                disabled={isJoined && connectionState === 'connected'}
+                maxLength={14}
+                className="bg-[#07080f] border border-cyan-500/40 rounded-xl px-4 py-2.5 text-base font-mono font-bold text-cyan-200 placeholder-slate-500 focus:outline-none focus:border-cyan-400 w-48 tracking-widest text-center shadow-inner"
               />
               <input
                 type="text"
                 id="pin-auth-input"
-                placeholder="4-Char PIN"
+                placeholder="PIN (Optional)"
                 value={pinInput}
                 onChange={(e) => setPinInput(e.target.value.toUpperCase())}
-                disabled={isJoined}
-                maxLength={4}
-                className="bg-[#07080f] border border-emerald-500/30 rounded-xl px-2.5 py-2 text-sm font-mono text-emerald-300 placeholder-slate-500 focus:outline-none focus:border-emerald-400 w-28 tracking-widest text-center uppercase"
-                title="4-Character Rotating Security PIN provided by Host"
+                disabled={isJoined && connectionState === 'connected'}
+                maxLength={6}
+                className="bg-[#07080f] border border-emerald-500/30 rounded-xl px-3 py-2.5 text-xs font-mono text-emerald-300 placeholder-slate-500 focus:outline-none focus:border-emerald-400 w-28 tracking-widest text-center uppercase shadow-inner"
+                title="Optional PIN if Host unattended access is disabled"
               />
             </div>
-            {!isJoined ? (
+
+            <div className="flex items-center gap-2">
+              {!isJoined || connectionState === 'failed' || connectionState === 'closed' ? (
+                <button
+                  id="join-room-button"
+                  type="submit"
+                  className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 font-extrabold text-sm flex items-center justify-center gap-2 shadow-[0_0_20px_rgba(6,182,212,0.4)] transition-all font-mono shrink-0"
+                >
+                  <Zap className="w-4 h-4 fill-current" />
+                  <span>Connect</span>
+                </button>
+              ) : (
+                <button
+                  id="disconnect-room-button"
+                  type="button"
+                  onClick={handleDisconnect}
+                  className="px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg transition-all font-mono shrink-0"
+                >
+                  <Power className="w-4 h-4" />
+                  <span>Disconnect</span>
+                </button>
+              )}
+
               <button
-                id="join-room-button"
-                type="submit"
-                className="px-4 py-2 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 font-bold text-xs flex items-center gap-2 shadow-[0_0_20px_rgba(6,182,212,0.4)] transition-all font-mono shrink-0"
-              >
-                <Zap className="w-4 h-4 fill-current" />
-                <span>Connect</span>
-              </button>
-            ) : (
-              <button
-                id="disconnect-room-button"
                 type="button"
-                onClick={handleDisconnect}
-                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs flex items-center gap-2 shadow-lg transition-all font-mono shrink-0"
+                onClick={() => setShowServerSettings(!showServerSettings)}
+                className="p-2.5 rounded-xl bg-[#07080f] border border-cyan-500/30 text-slate-400 hover:text-cyan-300 transition-colors"
+                title="Signaling Server URL Settings"
               >
-                <Power className="w-4 h-4" />
-                <span>Disconnect</span>
+                <Settings className="w-4 h-4" />
               </button>
-            )}
+            </div>
           </form>
+        </div>
+
+        {/* Host Server Address Bar (Always Accessible with Live Status) */}
+        <div className="mt-4 pt-3 border-t border-cyan-500/15 flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
+          <div className="flex flex-wrap items-center gap-2 flex-1 min-w-72">
+            <span className="text-slate-300 flex items-center gap-1.5 shrink-0 font-semibold">
+              <Server className="w-3.5 h-3.5 text-cyan-400" />
+              Host Server / Cloudflare Address:
+            </span>
+            <input
+              type="text"
+              id="server-url-input"
+              value={serverUrlInput}
+              onChange={(e) => {
+                setServerUrlInput(e.target.value);
+                localStorage.setItem('remotedesk_signal_url', e.target.value);
+              }}
+              placeholder="http://192.168.x.x:4000 or https://xxxx.trycloudflare.com"
+              className="bg-[#07080f] border border-cyan-500/30 rounded-lg px-3 py-1.5 text-cyan-200 flex-1 min-w-56 focus:outline-none focus:border-cyan-400 shadow-inner text-xs"
+            />
+            <button
+              type="button"
+              onClick={handleScanLan}
+              disabled={isScanningLan}
+              className="px-2.5 py-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 flex items-center gap-1 transition-colors cursor-pointer disabled:opacity-50"
+              title="Auto-scan local Wi-Fi / LAN for running RemoteDesk Host"
+            >
+              {isScanningLan ? <Loader2 className="w-3 h-3 animate-spin" /> : <Search className="w-3 h-3" />}
+              <span>{isScanningLan ? 'Scanning...' : 'Scan LAN'}</span>
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className={`px-2.5 py-1 rounded-full text-[11px] font-bold border flex items-center gap-1.5 ${
+              isSocketConnected
+                ? 'bg-emerald-950/60 border-emerald-500/40 text-emerald-300'
+                : 'bg-rose-950/60 border-rose-500/40 text-rose-300 animate-pulse'
+            }`}>
+              {isSocketConnected ? (
+                <>
+                  <Wifi className="w-3 h-3 text-emerald-400" />
+                  <span>Server Connected</span>
+                </>
+              ) : (
+                <>
+                  <WifiOff className="w-3 h-3 text-rose-400" />
+                  <span>Server Unreachable (Set Host IP)</span>
+                </>
+              )}
+            </span>
+          </div>
         </div>
       </div>
 
-      {/* Main Grid Layout */}
+      {/* Main Content Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left Column: Remote Stream & Canvas Viewport (8 Cols) */}
+        {/* Left Column: Remote Stream & Video Player (8 Cols) */}
         <div className="lg:col-span-8 space-y-6">
-          <div className="bg-[#0c0e18]/90 border border-cyan-500/20 rounded-2xl p-5 space-y-4 shadow-xl backdrop-blur-xl">
+          <div className="bg-[#0c0e18]/95 border border-cyan-500/20 rounded-2xl p-5 space-y-4 shadow-xl backdrop-blur-xl">
             {/* Viewport Header Controls */}
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-cyan-500/15 pb-4">
               <div className="flex items-center space-x-2">
                 <Tv className="w-4 h-4 text-cyan-400" />
-                <h3 className="font-bold text-white text-base">Remote Screen Viewport</h3>
+                <h3 className="font-bold text-white text-base">Remote Screen Output</h3>
                 {isJoined && (
                   <span
                     className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium ${
@@ -614,14 +742,13 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
                         connectionState === 'connected' ? 'bg-emerald-400' : 'bg-amber-400'
                       }`}
                     />
-                    {connectionState === 'connected' ? 'STREAM CONNECTED' : 'INITIALIZING'}
+                    {connectionState === 'connected' ? 'LIVE (60 FPS)' : connectionState.toUpperCase()}
                   </span>
                 )}
               </div>
 
               {/* Viewport Control Actions */}
               <div className="flex items-center space-x-2 flex-wrap">
-                {/* File Transfer Trigger Button */}
                 <button
                   id="client-open-files-button"
                   onClick={() => setIsFileModalOpen(true)}
@@ -668,7 +795,7 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
               </div>
             </div>
 
-            {/* Interactive Remote Desktop Container with Annotation Layer */}
+            {/* Interactive Remote Desktop Container */}
             <div
               ref={containerRef}
               id="client-viewport-container"
@@ -693,7 +820,7 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
                 className="w-full h-full object-contain pointer-events-none"
               />
 
-              {/* Phase 3: Interactive Annotation & Laser Pointer Layer */}
+              {/* Annotation & Laser Pointer Layer */}
               <AnnotationCanvas
                 mode={annotationMode}
                 onModeChange={setAnnotationMode}
@@ -709,88 +836,68 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
                     <Tv className="w-8 h-8 opacity-75" />
                   </div>
                   <div>
-                    <p className="text-base font-semibold text-slate-200">No Active Stream Connected</p>
+                    <p className="text-base font-semibold text-slate-200">No Stream Connected</p>
                     <p className="text-xs text-slate-400 max-w-sm mx-auto mt-1">
-                      Enter the Host&apos;s 6-digit Room ID above or start a simulation on the Host tab to begin remote control.
+                      Enter the Host&apos;s Desk ID above and click &quot;Connect&quot; to begin remote control.
                     </p>
                   </div>
                 </div>
               )}
 
-              {/* Coordinate Normalization Real-Time HUD Overlay */}
+              {/* Coordinate HUD */}
               {showCoordinateHUD && lastCoordResult && (
                 <div className="absolute bottom-3 left-3 z-30 bg-[#07080f]/90 backdrop-blur-md p-3 rounded-xl border border-cyan-500/30 text-[11px] font-mono text-cyan-200 space-y-1 shadow-2xl pointer-events-none">
                   <div className="text-[10px] uppercase text-slate-400 font-bold border-b border-cyan-500/20 pb-1">
-                    Coordinate Math HUD
+                    Coordinate HUD
                   </div>
                   <div>
-                    Normalized (u, v):{' '}
-                    <span className="text-cyan-400 font-bold">
-                      ({lastCoordResult.normalizedX.toFixed(4)}, {lastCoordResult.normalizedY.toFixed(4)})
-                    </span>
+                    Normalized: ({lastCoordResult.normalizedX.toFixed(3)}, {lastCoordResult.normalizedY.toFixed(3)})
                   </div>
                   <div>
-                    Target Host Screen:{' '}
-                    <span className="text-emerald-400 font-bold">
-                      ({lastCoordResult.hostLogicalX}px, {lastCoordResult.hostLogicalY}px)
-                    </span>
-                  </div>
-                  <div className="text-slate-400 text-[10px]">
-                    Active Video Area: {Math.round(lastCoordResult.renderedWidth)}x{Math.round(lastCoordResult.renderedHeight)} (Offset: X={Math.round(lastCoordResult.offsetX)}, Y={Math.round(lastCoordResult.offsetY)})
+                    Host Pixel: ({lastCoordResult.hostLogicalX}px, {lastCoordResult.hostLogicalY}px)
                   </div>
                 </div>
               )}
             </div>
           </div>
 
-          {/* Stream Quality Controls */}
+          {/* Quality Preset Selection */}
           <StreamControls
             currentProfile={currentQualityProfile}
-            onSelectProfile={(p) => {
-              setCurrentQualityProfile(p);
-              const profile = QUALITY_PROFILES.find((q) => q.id === p);
-              if (profile) {
-                setHostMetadata((prev) => ({
-                  ...prev,
-                  width: profile.resolution.width,
-                  height: profile.resolution.height,
-                }));
-              }
-            }}
+            onSelectProfile={(p) => setCurrentQualityProfile(p)}
             isHost={false}
           />
 
-          {/* Phase 3: Client Clipboard Sync Station */}
-          <div className="bg-[#0c0e18]/90 border border-cyan-500/20 rounded-2xl p-5 space-y-4 shadow-xl backdrop-blur-xl">
+          {/* Client Clipboard Sync */}
+          <div className="bg-[#0c0e18]/95 border border-cyan-500/20 rounded-2xl p-5 space-y-4 shadow-xl backdrop-blur-xl">
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-2">
                 <Clipboard className="w-4 h-4 text-cyan-400" />
-                <h3 className="font-bold text-white text-base">Client OS Clipboard Bridge</h3>
+                <h3 className="font-bold text-white text-base">Client Clipboard Synchronizer</h3>
               </div>
               <span className="text-xs font-mono px-2 py-0.5 rounded bg-cyan-950/60 border border-cyan-500/20 text-cyan-300">
-                Bidirectional Sync • {syncCount} Updates
+                Auto-Synced: {syncCount} items
               </span>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div className="p-3 bg-[#07080f] rounded-xl border border-cyan-500/20 space-y-1.5 text-xs font-mono">
-                <span className="text-slate-400 block text-[11px]">Last Synced Clipboard Payload</span>
+              <div className="p-3 bg-[#07080f] rounded-xl border border-cyan-500/20 space-y-1 text-xs font-mono">
+                <span className="text-slate-400 block text-[11px]">Last Synced Clipboard Text</span>
                 <p className="text-cyan-200 truncate bg-[#0d101a] p-2 rounded border border-slate-800">
-                  {lastSyncText || '(No clipboard text synced yet)'}
+                  {lastSyncText || '(No clipboard text received yet)'}
                 </p>
-                <div className="text-[10px] text-slate-400 flex justify-between">
+                <div className="text-[10px] text-slate-400 flex justify-between pt-1">
                   <span>Source: {lastSource.toUpperCase()}</span>
                   <span>Time: {lastSyncTime || '--:--:--'}</span>
                 </div>
               </div>
 
-              {/* Manual Send to Host */}
               <form onSubmit={handleManualSyncClipboard} className="p-3 bg-[#07080f] rounded-xl border border-cyan-500/20 space-y-2 text-xs">
-                <span className="text-slate-400 block font-medium">Broadcast Text to Host Clipboard</span>
+                <span className="text-slate-400 block font-medium">Send Text to Server Clipboard</span>
                 <div className="flex gap-2">
                   <input
                     type="text"
-                    placeholder="Type text to send to Host clipboard..."
+                    placeholder="Type text to paste into Host clipboard..."
                     value={manualClipInput}
                     onChange={(e) => setManualClipInput(e.target.value)}
                     className="flex-1 bg-[#05060b] border border-cyan-500/30 rounded px-2.5 py-1.5 text-slate-200 text-xs font-mono focus:outline-none focus:border-cyan-400"
@@ -799,169 +906,47 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
                     type="submit"
                     className="px-3 py-1.5 rounded bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 text-xs font-medium flex items-center gap-1"
                   >
-                    <Send className="w-3 h-3" />
-                    <span>Sync</span>
+                    <Send className="w-3.5 h-3.5" />
+                    <span>Send</span>
                   </button>
                 </div>
               </form>
             </div>
           </div>
-
-          {/* Quick Remote Keyboard Shortcuts Bar */}
-          <div className="bg-[#0b0d17]/90 border border-cyan-500/20 rounded-2xl p-4 shadow-xl backdrop-blur-xl space-y-2.5">
-            <div className="flex items-center justify-between text-xs">
-              <span className="font-bold text-white flex items-center gap-1.5">
-                <Keyboard className="w-4 h-4 text-cyan-400" />
-                Quick Host Keyboard Shortcuts (Forwarded over channel-events)
-              </span>
-              <span className="text-slate-400 font-mono text-[11px]">Reliable TCP Mode</span>
-            </div>
-
-            <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
-              <button
-                onClick={() => dispatchSpecialKey('Delete', 'Delete', { ctrl: true, alt: true })}
-                className="px-2.5 py-1.5 rounded-lg bg-[#07080f] hover:bg-cyan-950/60 text-cyan-300 border border-cyan-500/20 text-xs font-mono font-semibold transition-all text-center"
-              >
-                Ctrl+Alt+Del
-              </button>
-              <button
-                onClick={() => dispatchSpecialKey('Meta', 'MetaLeft', { meta: true })}
-                className="px-2.5 py-1.5 rounded-lg bg-[#07080f] hover:bg-cyan-950/60 text-cyan-300 border border-cyan-500/20 text-xs font-mono font-semibold transition-all text-center"
-              >
-                Win / ⌘ Key
-              </button>
-              <button
-                onClick={() => dispatchSpecialKey('Tab', 'Tab', { alt: true })}
-                className="px-2.5 py-1.5 rounded-lg bg-[#07080f] hover:bg-cyan-950/60 text-cyan-300 border border-cyan-500/20 text-xs font-mono font-semibold transition-all text-center"
-              >
-                Alt+Tab
-              </button>
-              <button
-                onClick={() => dispatchSpecialKey('Escape', 'Escape')}
-                className="px-2.5 py-1.5 rounded-lg bg-[#07080f] hover:bg-cyan-950/60 text-cyan-300 border border-cyan-500/20 text-xs font-mono font-semibold transition-all text-center"
-              >
-                Escape (Esc)
-              </button>
-              <button
-                onClick={() => dispatchSpecialKey('c', 'KeyC', { ctrl: true })}
-                className="px-2.5 py-1.5 rounded-lg bg-[#07080f] hover:bg-cyan-950/60 text-cyan-300 border border-cyan-500/20 text-xs font-mono font-semibold transition-all text-center"
-              >
-                Ctrl + C
-              </button>
-              <button
-                onClick={() => dispatchSpecialKey('v', 'KeyV', { ctrl: true })}
-                className="px-2.5 py-1.5 rounded-lg bg-[#07080f] hover:bg-cyan-950/60 text-cyan-300 border border-cyan-500/20 text-xs font-mono font-semibold transition-all text-center"
-              >
-                Ctrl + V
-              </button>
-            </div>
-          </div>
         </div>
 
-        {/* Right Column: Connection Diagnostics & Host Screen Target Config (4 Cols) */}
+        {/* Right Column: Telemetry & Connection Stats (4 Cols) */}
         <div className="lg:col-span-4 space-y-6">
-          {/* Target Host Screen Config */}
-          <div className="bg-[#0b0d17]/90 border border-cyan-500/20 rounded-2xl p-5 space-y-4 shadow-xl backdrop-blur-xl">
-            <div className="flex items-center justify-between">
-              <h3 className="font-bold text-white text-base flex items-center gap-2">
-                <Sliders className="w-4 h-4 text-cyan-400" />
-                Target Monitor Settings
-              </h3>
-              <span className="text-xs font-mono text-cyan-400/80 bg-cyan-950/40 px-2 py-0.5 rounded border border-cyan-500/20">
-                Resolution
-              </span>
+          <TelemetryStatsPanel
+            stats={stats}
+            isConnected={connectionState === 'connected'}
+            isConnecting={connectionState === 'connecting' || signalingState === 'have-remote-offer'}
+            isSocketConnected={isSocketConnected}
+            dataChannelsReady={dataChannelsReady}
+          />
+
+          {/* Quick Keyboard Hotkeys reference */}
+          <div className="bg-[#0c0e18]/95 border border-cyan-500/20 rounded-2xl p-5 space-y-3 shadow-xl backdrop-blur-xl text-xs font-mono">
+            <div className="flex items-center space-x-2 border-b border-cyan-500/15 pb-2.5">
+              <Keyboard className="w-4 h-4 text-cyan-400" />
+              <h4 className="font-bold text-white">Remote Input Controls</h4>
             </div>
-
-            <p className="text-xs text-slate-300 leading-relaxed">
-              Coordinates are calculated relative to the Host&apos;s physical resolution and DPR factor:
-            </p>
-
-            <div className="space-y-3 p-3 bg-[#07080f] rounded-xl border border-cyan-500/15 text-xs">
-              <div>
-                <label className="text-slate-400 font-medium block mb-1">Host Resolution Preset</label>
-                <div className="grid grid-cols-2 gap-2 font-mono">
-                  <button
-                    onClick={() => setHostMetadata({ width: 1920, height: 1080, devicePixelRatio: 1.0 })}
-                    className={`p-2 rounded-lg border transition-all text-left ${
-                      hostMetadata.width === 1920
-                        ? 'bg-cyan-500/20 border-cyan-400 text-cyan-200'
-                        : 'bg-[#0d101a] border-slate-800 text-slate-400'
-                    }`}
-                  >
-                    1080p FHD (1920x1080)
-                  </button>
-                  <button
-                    onClick={() => setHostMetadata({ width: 3840, height: 2160, devicePixelRatio: 2.0 })}
-                    className={`p-2 rounded-lg border transition-all text-left ${
-                      hostMetadata.width === 3840
-                        ? 'bg-cyan-500/20 border-cyan-400 text-cyan-200'
-                        : 'bg-[#0d101a] border-slate-800 text-slate-400'
-                    }`}
-                  >
-                    4K UHD (3840x2160)
-                  </button>
-                </div>
+            <div className="space-y-2 text-slate-300">
+              <div className="flex justify-between items-center">
+                <span>Direct Mouse Injection:</span>
+                <span className="text-cyan-300 font-bold">Sub-ms UDP</span>
               </div>
-
-              <div className="grid grid-cols-2 gap-2 pt-1">
-                <div>
-                  <span className="text-slate-400 block text-[10px]">Width (px)</span>
-                  <input
-                    type="number"
-                    value={hostMetadata.width}
-                    onChange={(e) => setHostMetadata((prev) => ({ ...prev, width: parseInt(e.target.value) || 1920 }))}
-                    className="w-full bg-[#05060b] border border-cyan-500/20 rounded px-2 py-1 text-white font-mono"
-                  />
-                </div>
-                <div>
-                  <span className="text-slate-400 block text-[10px]">Height (px)</span>
-                  <input
-                    type="number"
-                    value={hostMetadata.height}
-                    onChange={(e) => setHostMetadata((prev) => ({ ...prev, height: parseInt(e.target.value) || 1080 }))}
-                    className="w-full bg-[#05060b] border border-cyan-500/20 rounded px-2 py-1 text-white font-mono"
-                  />
-                </div>
+              <div className="flex justify-between items-center">
+                <span>Keyboard & Modifiers:</span>
+                <span className="text-emerald-400 font-bold">Full Passthrough</span>
               </div>
-            </div>
-          </div>
-
-          {/* WebRTC Diagnostics & Telemetry */}
-          <div className="bg-[#0b0d17]/90 border border-cyan-500/20 rounded-2xl p-5 space-y-4 shadow-xl backdrop-blur-xl">
-            <div className="flex items-center justify-between">
-              <h3 className="font-bold text-white text-base flex items-center gap-2">
-                <Activity className="w-4 h-4 text-emerald-400" />
-                Connection Telemetry
-              </h3>
-              <span className="text-xs font-mono text-emerald-400 font-bold">
-                {stats.rttMs} ms RTT
-              </span>
-            </div>
-
-            <div className="space-y-2 font-mono text-xs">
-              <div className="p-2.5 bg-[#07080f] rounded-xl border border-cyan-500/15 flex justify-between items-center">
-                <span className="text-slate-400">Stream FPS:</span>
-                <span className="text-emerald-400 font-bold">{stats.fps} FPS</span>
+              <div className="flex justify-between items-center">
+                <span>Fullscreen Toggle:</span>
+                <span className="text-slate-400 font-bold">F11 / Button</span>
               </div>
-              <div className="p-2.5 bg-[#07080f] rounded-xl border border-cyan-500/15 flex justify-between items-center">
-                <span className="text-slate-400">Bitrate:</span>
-                <span className="text-cyan-300 font-bold">{stats.bitrateKbps} kbps</span>
-              </div>
-              <div className="p-2.5 bg-[#07080f] rounded-xl border border-cyan-500/15 flex justify-between items-center">
-                <span className="text-slate-400">Packets Emitted:</span>
-                <span className="text-slate-200 font-bold">{stats.packetsSent}</span>
-              </div>
-              <div className="p-2.5 bg-[#07080f] rounded-xl border border-cyan-500/15 flex justify-between items-center">
-                <span className="text-slate-400">Mouse Channel:</span>
-                <span className={dataChannelsReady.mouse ? 'text-emerald-400' : 'text-slate-500'}>
-                  {dataChannelsReady.mouse ? 'OPEN (UDP Mode)' : 'Connecting'}
-                </span>
-              </div>
-              <div className="p-2.5 bg-[#07080f] rounded-xl border border-cyan-500/15 flex justify-between items-center">
-                <span className="text-slate-400">Events Channel:</span>
-                <span className={dataChannelsReady.events ? 'text-emerald-400' : 'text-slate-500'}>
-                  {dataChannelsReady.events ? 'OPEN (TCP Mode)' : 'Connecting'}
-                </span>
+              <div className="flex justify-between items-center">
+                <span>Clipboard Sync:</span>
+                <span className="text-indigo-300 font-bold">Bidirectional</span>
               </div>
             </div>
           </div>
@@ -973,10 +958,12 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
         isOpen={isFileModalOpen}
         onClose={() => setIsFileModalOpen(false)}
         transfers={activeTransfers}
-        onUploadFiles={handleClientUploadFiles}
+        onUploadFiles={(files) => {
+          Array.from(files).forEach((file) => {
+            fileTransferManagerRef.current.sendFile(file);
+          });
+        }}
         onCancelTransfer={(id) => fileTransferManagerRef.current.cancelTransfer(id)}
-        onClearCompleted={() => fileTransferManagerRef.current.clearCompleted()}
-        isPeerConnected={connectionState === 'connected'}
       />
     </div>
   );

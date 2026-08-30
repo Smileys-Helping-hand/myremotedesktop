@@ -1,144 +1,291 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-
-export const PIN_ROTATION_PERIOD_SECONDS = 60;
-const PIN_CHARSET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Unambiguous chars (no 0/O, 1/I)
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 /**
- * Generates a deterministic, time-synced 4-character alphanumeric PIN
- * similar to TOTP / RSA SecurID tokens.
+ * ============================================================================
+ * SESSION AUTHENTICATION — RFC 6238 TOTP
+ * ============================================================================
+ *
+ * The host mints a 160-bit session secret at session start. The rotating PIN is
+ * an HMAC-SHA256 TOTP over that secret, so it cannot be derived from the room
+ * ID — the room ID is public routing information, the secret never leaves the
+ * host process, and only the host validates PINs.
+ *
+ * All hashing goes through WebCrypto (`crypto.subtle`), which is available in
+ * the Tauri webview, in browsers over a secure context, and in Node >= 20.
  */
-export function generateRotatingPin(
-  sessionId: string,
-  timestamp: number = Date.now(),
-  periodSeconds: number = PIN_ROTATION_PERIOD_SECONDS
-): string {
-  const timeWindow = Math.floor(timestamp / 1000 / periodSeconds);
-  // Hash seed combining sessionId + timeWindow
-  let hash = 0x811c9dc5; // FNV-1a 32-bit prime
-  const seedString = `${sessionId.trim().toUpperCase()}:${timeWindow}:REMOTE_DESK_SALT_v4`;
 
-  for (let i = 0; i < seedString.length; i++) {
-    hash ^= seedString.charCodeAt(i);
-    hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+export const PIN_ROTATION_PERIOD_SECONDS = 60;
+export const PIN_DIGITS = 6;
+
+/** Number of adjacent time windows accepted, to absorb host/client clock drift. */
+export const DEFAULT_TOLERANCE_WINDOWS = 1;
+
+const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+
+/**
+ * Whether this page can derive PINs at all.
+ *
+ * `crypto.subtle` only exists in a secure context. The desktop app, `localhost`
+ * and any https origin have one; a page served from a LAN address over plain
+ * http does not. Such a page cannot host a session anyway — screen capture is
+ * gated on the same rule — so the honest response is to report PINs as
+ * unavailable rather than to retry a throw every half second.
+ */
+export function isPinSupported(): boolean {
+  return typeof globalThis.crypto?.subtle !== 'undefined';
+}
+
+function requireSubtle(): SubtleCrypto {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) {
+    throw new Error(
+      'WebCrypto SubtleCrypto is unavailable. RemoteDesk requires a secure context (the desktop app, https, or localhost).'
+    );
   }
-
-  // Generate 4 characters from the hash
-  let pin = '';
-  let currentHash = Math.abs(hash);
-  for (let i = 0; i < 4; i++) {
-    const index = (currentHash + i * 37) % PIN_CHARSET.length;
-    pin += PIN_CHARSET[index];
-    currentHash = Math.floor(currentHash / PIN_CHARSET.length) ^ (i * 997);
-  }
-
-  return pin;
+  return subtle;
 }
 
 /**
- * Validates an entered PIN against the current time window, allowing a ±1 window tolerance
- * for slight clock drift between client and host machines.
+ * Mints a fresh 160-bit session secret, base32-encoded.
+ * Called once per hosting session; never transmitted over the wire.
  */
-export function validateRotatingPin(
-  enteredPin: string,
-  sessionId: string,
+export function generateSessionSecret(byteLength: number = 20): string {
+  const bytes = new Uint8Array(byteLength);
+  globalThis.crypto.getRandomValues(bytes);
+  return base32Encode(bytes);
+}
+
+export function base32Encode(bytes: Uint8Array): string {
+  let bits = 0;
+  let value = 0;
+  let output = '';
+  for (let i = 0; i < bytes.length; i++) {
+    value = (value << 8) | bytes[i];
+    bits += 8;
+    while (bits >= 5) {
+      output += BASE32_ALPHABET[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) {
+    output += BASE32_ALPHABET[(value << (5 - bits)) & 31];
+  }
+  return output;
+}
+
+export function base32Decode(input: string): Uint8Array {
+  const clean = input.toUpperCase().replace(/=+$/, '').replace(/\s/g, '');
+  let bits = 0;
+  let value = 0;
+  const out: number[] = [];
+  for (const char of clean) {
+    const idx = BASE32_ALPHABET.indexOf(char);
+    if (idx === -1) throw new Error(`Invalid base32 character: ${char}`);
+    value = (value << 5) | idx;
+    bits += 5;
+    if (bits >= 8) {
+      out.push((value >>> (bits - 8)) & 0xff);
+      bits -= 8;
+    }
+  }
+  return new Uint8Array(out);
+}
+
+/** Returns the TOTP counter (time window index) for a given timestamp. */
+export function getTimeWindow(
+  timestamp: number = Date.now(),
+  periodSeconds: number = PIN_ROTATION_PERIOD_SECONDS
+): number {
+  return Math.floor(timestamp / 1000 / periodSeconds);
+}
+
+/**
+ * Generates the TOTP code for a specific time window.
+ * Standard RFC 4226 dynamic truncation over an HMAC-SHA256 digest.
+ */
+export async function generatePinForWindow(
+  secret: string,
+  timeWindow: number,
+  digits: number = PIN_DIGITS
+): Promise<string> {
+  const subtle = requireSubtle();
+  const keyBytes = base32Decode(secret);
+
+  const key = await subtle.importKey(
+    'raw',
+    keyBytes as BufferSource,
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+
+  // 8-byte big-endian counter
+  const counter = new ArrayBuffer(8);
+  const view = new DataView(counter);
+  view.setUint32(0, Math.floor(timeWindow / 2 ** 32));
+  view.setUint32(4, timeWindow >>> 0);
+
+  const signature = new Uint8Array(await subtle.sign('HMAC', key, counter));
+
+  // Dynamic truncation (RFC 4226 §5.3)
+  const offset = signature[signature.length - 1] & 0x0f;
+  const binary =
+    ((signature[offset] & 0x7f) << 24) |
+    ((signature[offset + 1] & 0xff) << 16) |
+    ((signature[offset + 2] & 0xff) << 8) |
+    (signature[offset + 3] & 0xff);
+
+  return (binary % 10 ** digits).toString().padStart(digits, '0');
+}
+
+/** Generates the TOTP code for the current time window. */
+export function generateRotatingPin(
+  secret: string,
   timestamp: number = Date.now(),
   periodSeconds: number = PIN_ROTATION_PERIOD_SECONDS,
-  toleranceWindows: number = 1
-): boolean {
-  const cleanEntered = enteredPin.trim().toUpperCase();
-  if (cleanEntered.length !== 4) return false;
+  digits: number = PIN_DIGITS
+): Promise<string> {
+  return generatePinForWindow(secret, getTimeWindow(timestamp, periodSeconds), digits);
+}
 
-  // Check current window, previous window (-1), and next window (+1)
+/**
+ * Length-independent, data-independent comparison.
+ * Avoids leaking how many leading digits an attacker guessed correctly.
+ */
+export function constantTimeEquals(a: string, b: string): boolean {
+  const len = Math.max(a.length, b.length);
+  let diff = a.length ^ b.length;
+  for (let i = 0; i < len; i++) {
+    diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
+  }
+  return diff === 0;
+}
+
+/**
+ * Validates a submitted PIN against the current window plus `toleranceWindows`
+ * on either side. Every candidate window is evaluated even after a match, so
+ * validation time does not reveal which window succeeded.
+ */
+export async function validateRotatingPin(
+  enteredPin: string,
+  secret: string,
+  timestamp: number = Date.now(),
+  periodSeconds: number = PIN_ROTATION_PERIOD_SECONDS,
+  toleranceWindows: number = DEFAULT_TOLERANCE_WINDOWS
+): Promise<boolean> {
+  const candidate = enteredPin.trim();
+  if (!/^\d+$/.test(candidate) || candidate.length !== PIN_DIGITS) return false;
+
+  const currentWindow = getTimeWindow(timestamp, periodSeconds);
+  let matched = false;
+
   for (let offset = -toleranceWindows; offset <= toleranceWindows; offset++) {
-    const checkTime = timestamp + offset * periodSeconds * 1000;
-    const expectedPin = generateRotatingPin(sessionId, checkTime, periodSeconds);
-    if (cleanEntered === expectedPin) {
-      return true;
+    const expected = await generatePinForWindow(secret, currentWindow + offset);
+    if (constantTimeEquals(candidate, expected)) {
+      matched = true;
     }
   }
 
-  return false;
+  return matched;
 }
 
-/**
- * Calculates how many seconds remain before the current rotating PIN expires.
- */
+/** Seconds remaining before the current PIN rotates. */
 export function getPinTimeRemaining(
   timestamp: number = Date.now(),
   periodSeconds: number = PIN_ROTATION_PERIOD_SECONDS
-): { remainingSeconds: number; percent: number; elapsedSeconds: number } {
-  const nowSeconds = Math.floor(timestamp / 1000);
-  const elapsedSeconds = nowSeconds % periodSeconds;
+): { remainingSeconds: number; elapsedSeconds: number; percent: number } {
+  const elapsedSeconds = Math.floor(timestamp / 1000) % periodSeconds;
   const remainingSeconds = periodSeconds - elapsedSeconds;
-  const percent = ((periodSeconds - remainingSeconds) / periodSeconds) * 100;
-
   return {
     remainingSeconds,
-    percent,
     elapsedSeconds,
+    percent: (elapsedSeconds / periodSeconds) * 100,
   };
 }
 
 export interface RotatingPinState {
+  /** Current TOTP code, or '' until the first async computation resolves. */
   pin: string;
+  /** False where WebCrypto is unavailable; `pin` then stays empty. */
+  supported: boolean;
   remainingSeconds: number;
   percent: number;
-  isExpiringSoon: boolean; // < 10s
-  refreshPin: () => void;
-  validatePin: (candidate: string) => boolean;
+  isExpiringSoon: boolean;
+  /** Discards the current secret and mints a new one, invalidating shared PINs. */
+  rotateSecret: () => void;
+  validatePin: (candidate: string) => Promise<boolean>;
 }
 
 /**
- * React hook that manages the Host's 60-second rotating PIN lifecycle.
+ * Host-side hook owning the session secret and the PIN it produces.
+ * The secret lives only in this closure — it is never rendered or transmitted.
  */
-export function useRotatingPin(sessionId: string, enabled: boolean = true): RotatingPinState {
-  const [pin, setPin] = useState<string>(() => generateRotatingPin(sessionId));
-  const [timeInfo, setTimeInfo] = useState(() => getPinTimeRemaining());
-  const manualSaltRef = useRef<number>(0);
+export function useRotatingPin(enabled: boolean = true): RotatingPinState {
+  const supported = isPinSupported();
+  const secretRef = useRef<string>('');
+  if (supported && !secretRef.current) {
+    secretRef.current = generateSessionSecret();
+  }
 
-  const calculateCurrent = useCallback(() => {
-    const info = getPinTimeRemaining();
-    setTimeInfo(info);
-    const newPin = generateRotatingPin(sessionId);
-    setPin(newPin);
-  }, [sessionId]);
+  const [pin, setPin] = useState<string>('');
+  const [timeInfo, setTimeInfo] = useState(() => getPinTimeRemaining());
 
   useEffect(() => {
-    if (!enabled || !sessionId) return;
+    if (!enabled || !supported) return;
 
-    calculateCurrent();
+    let cancelled = false;
+    let lastWindow = -1;
 
-    const interval = setInterval(() => {
-      const info = getPinTimeRemaining();
-      setTimeInfo(info);
+    const tick = () => {
+      const now = Date.now();
+      setTimeInfo(getPinTimeRemaining(now));
 
-      // If a new 60s window starts, regenerate
-      if (info.remainingSeconds === PIN_ROTATION_PERIOD_SECONDS || info.remainingSeconds === 1) {
-        setPin(generateRotatingPin(sessionId));
-      }
-    }, 500);
+      const currentWindow = getTimeWindow(now);
+      if (currentWindow === lastWindow) return;
+      lastWindow = currentWindow;
 
-    return () => clearInterval(interval);
-  }, [sessionId, enabled, calculateCurrent]);
+      generateRotatingPin(secretRef.current, now)
+        .then((next) => {
+          if (!cancelled) setPin(next);
+        })
+        .catch((err) => {
+          console.error('[security] failed to derive rotating PIN:', err);
+        });
+    };
 
-  const refreshPin = useCallback(() => {
-    manualSaltRef.current += 1;
-    setPin(generateRotatingPin(sessionId + manualSaltRef.current));
-  }, [sessionId]);
+    tick();
+    const interval = setInterval(tick, 500);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [enabled, supported]);
+
+  const rotateSecret = useCallback(() => {
+    if (!supported) return;
+    secretRef.current = generateSessionSecret();
+    generateRotatingPin(secretRef.current)
+      .then(setPin)
+      .catch((err) => console.error('[security] failed to derive rotating PIN:', err));
+  }, [supported]);
 
   const validatePin = useCallback(
-    (candidate: string) => {
-      return validateRotatingPin(candidate, sessionId);
+    async (candidate: string) => {
+      // Refusing every PIN is the safe direction: without WebCrypto there is no
+      // way to tell a correct one from a wrong one.
+      if (!supported) return false;
+      return validateRotatingPin(candidate, secretRef.current);
     },
-    [sessionId]
+    [supported]
   );
 
   return {
     pin,
+    supported,
     remainingSeconds: timeInfo.remainingSeconds,
     percent: timeInfo.percent,
     isExpiringSoon: timeInfo.remainingSeconds <= 10,
-    refreshPin,
+    rotateSecret,
     validatePin,
   };
 }

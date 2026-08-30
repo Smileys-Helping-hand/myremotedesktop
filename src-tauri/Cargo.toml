@@ -1,0 +1,68 @@
+[package]
+name = "remotedesk"
+version = "1.1.0"
+description = "Low-latency WebRTC remote desktop host"
+authors = ["RemoteDesk"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "remotedesk_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-global-shortcut = "2"
+# In-app updates. The updater verifies a minisign signature against the public
+# key in tauri.conf.json before installing, so a tampered release is rejected
+# even if the download host is compromised.
+tauri-plugin-updater = "2"
+# Relaunching into the freshly installed version.
+tauri-plugin-process = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+enigo = "0.6"
+
+# The embedded signaling server. A packaged RemoteDesk hosts its own rendezvous
+# point so an installed app works with no Node process and no cloud service.
+axum = { version = "0.8", default-features = false, features = ["ws", "json", "tokio", "http1", "query"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "process", "io-util"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+if-addrs = "0.13"
+# The control token gates input injection, so it comes from the OS RNG.
+getrandom = "0.2"
+# The webview and any browser client are a different origin from the signaling
+# server, so its JSON endpoints need CORS headers to be readable.
+tower-http = { version = "0.6", features = ["cors"] }
+
+# Linux input injection. enigo defaults to X11 only; `wayland` adds the wlroots
+# virtual-input protocols (Sway, Hyprland).
+#
+# `libei_tokio` is deliberately NOT enabled. It would add the portal-based
+# RemoteDesktop route for GNOME/KDE Wayland, but enigo 0.6.1 unwraps the portal
+# lookup inside `open_connection`, so on any machine without that portal —
+# including ordinary X11 desktops — constructing the input engine panics rather
+# than falling back. Until that is fixed upstream it is not safe to compile in.
+[target.'cfg(target_os = "linux")'.dependencies]
+enigo = { version = "0.6", features = ["wayland"] }
+# WebKitGTK gates getUserMedia/getDisplayMedia and RTCPeerConnection behind
+# settings that default to off, and neither Tauri nor wry turns them on. Pinned
+# to the exact version wry already links so there is one webkit2gtk in the graph.
+webkit2gtk = { version = "=2.0.2", features = ["v2_38"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+# Unwinding rather than aborting: input injection runs third-party backends
+# against whatever display server the host happens to have, and a panic in one
+# of them must not take down a live remote session. `input.rs` catches it.
+panic = "unwind"
+strip = true

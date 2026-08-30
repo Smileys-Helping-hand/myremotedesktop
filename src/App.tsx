@@ -1,13 +1,38 @@
-import React, { useState } from 'react';
+import { lazy, Suspense, useState } from 'react';
+import { Loader2 } from 'lucide-react';
 import { Header, ActiveTab } from './components/Header';
 import { HostView } from './components/HostView';
 import { ClientView } from './components/ClientView';
-import { CoordinateSandbox } from './components/CoordinateSandbox';
-import { BlueprintsViewer } from './components/BlueprintsViewer';
-import { ProtocolInspector } from './components/ProtocolInspector';
-import { SecurityKillSwitchDemo } from './components/SecurityKillSwitchDemo';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ToastProvider } from './components/ToastSystem';
+import { UpdateBanner } from './components/UpdateBanner';
+
+// Host and Client are the app. The rest are reference material nobody opens
+// mid-session, so they load on demand instead of weighing down first paint.
+const DownloadsView = lazy(() =>
+  import('./components/DownloadsView').then((m) => ({ default: m.DownloadsView }))
+);
+const CoordinateSandbox = lazy(() =>
+  import('./components/CoordinateSandbox').then((m) => ({ default: m.CoordinateSandbox }))
+);
+const BlueprintsViewer = lazy(() =>
+  import('./components/BlueprintsViewer').then((m) => ({ default: m.BlueprintsViewer }))
+);
+const ProtocolInspector = lazy(() =>
+  import('./components/ProtocolInspector').then((m) => ({ default: m.ProtocolInspector }))
+);
+const SecurityKillSwitchDemo = lazy(() =>
+  import('./components/SecurityKillSwitchDemo').then((m) => ({ default: m.SecurityKillSwitchDemo }))
+);
+
+function TabLoading() {
+  return (
+    <div className="flex items-center justify-center py-24 text-slate-400">
+      <Loader2 className="h-5 w-5 animate-spin mr-2.5 text-cyan-400" />
+      <span className="text-sm">Loading…</span>
+    </div>
+  );
+}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('host');
@@ -34,21 +59,28 @@ export default function App() {
         {/* Top Navigation */}
         <Header activeTab={activeTab} setActiveTab={setActiveTab} />
 
+        {/* Offers an in-place update when one is published. Renders nothing in
+            the browser client, or when this install is package-manager owned. */}
+        <UpdateBanner />
+
         {/* Main Container with Error Boundary Protection */}
         <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 pt-6 pb-8">
           <ErrorBoundary fallbackTitle="Remote Desktop Workspace Fault">
-            {activeTab === 'host' && <HostView onSwitchToClient={handleSwitchToClient} />}
-            {activeTab === 'client' && (
-              <ClientView
-                initialRoomId={sharedRoomId}
-                initialPin={sharedPin}
-                onSwitchToHost={handleSwitchToHost}
-              />
-            )}
-            {activeTab === 'sandbox' && <CoordinateSandbox />}
-            {activeTab === 'protocol' && <ProtocolInspector />}
-            {activeTab === 'security' && <SecurityKillSwitchDemo />}
-            {activeTab === 'blueprints' && <BlueprintsViewer />}
+            <Suspense fallback={<TabLoading />}>
+              {activeTab === 'host' && <HostView onSwitchToClient={handleSwitchToClient} />}
+              {activeTab === 'client' && (
+                <ClientView
+                  initialRoomId={sharedRoomId}
+                  initialPin={sharedPin}
+                  onSwitchToHost={handleSwitchToHost}
+                />
+              )}
+              {activeTab === 'downloads' && <DownloadsView />}
+              {activeTab === 'sandbox' && <CoordinateSandbox />}
+              {activeTab === 'protocol' && <ProtocolInspector />}
+              {activeTab === 'security' && <SecurityKillSwitchDemo />}
+              {activeTab === 'blueprints' && <BlueprintsViewer />}
+            </Suspense>
           </ErrorBoundary>
         </main>
 
@@ -61,7 +93,7 @@ export default function App() {
                 <span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-500" />
               </span>
               <span className="font-medium text-slate-300 tracking-wide text-xs sm:text-sm">
-                WebRTC + Electron + Node.js Remote Desktop Engine
+                WebRTC + Tauri + Rust Remote Desktop Engine
               </span>
             </div>
             <div className="font-mono text-cyan-400/90 text-[11px] sm:text-xs bg-cyan-950/50 border border-cyan-500/25 px-3.5 py-1.5 rounded-full shadow-inner text-center">

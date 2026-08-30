@@ -4,10 +4,6 @@ import {
   Minimize,
   Eye,
   EyeOff,
-  Sparkles,
-  Layers,
-  Radio,
-  Sliders,
   Tv,
 } from 'lucide-react';
 import { AnnotationCanvas } from './AnnotationCanvas';
@@ -40,13 +36,7 @@ export const StreamVideoPlayer: React.FC<StreamVideoPlayerProps> = ({
   mode,
   iceConnectionState = 'connected',
   stats,
-  laserPosition,
-  remoteStrokes = [],
-  onDrawStroke,
-  onClearStrokes,
   activeTool = 'none',
-  activeColor = '#00d2ff',
-  isControlActive = true,
   onMouseMove,
   onMouseDown,
   onMouseUp,
@@ -163,7 +153,7 @@ export const StreamVideoPlayer: React.FC<StreamVideoPlayerProps> = ({
 
           {stats && (
             <span className="px-2.5 py-1 rounded-lg bg-[#070914]/85 border border-slate-800 text-slate-300 font-mono text-[11px] backdrop-blur-md shadow-lg flex items-center gap-2">
-              <span className="text-emerald-400 font-bold">{stats.roundTripTimeMs.toFixed(0)} ms</span>
+              <span className="text-emerald-400 font-bold">{Math.round(stats.roundTripTimeMs ?? stats.rttMs ?? 0)} ms</span>
               <span className="text-slate-600">•</span>
               <span>{stats.fps} FPS</span>
             </span>

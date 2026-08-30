@@ -22,8 +22,8 @@ interface FileTransferModalProps {
   transfers: ActiveFileTransfer[];
   onUploadFiles: (files: FileList) => void;
   onCancelTransfer: (transferId: string) => void;
-  onClearCompleted: () => void;
-  isPeerConnected: boolean;
+  onClearCompleted?: () => void;
+  isPeerConnected?: boolean;
 }
 
 export const FileTransferModal: React.FC<FileTransferModalProps> = ({

@@ -1,7 +1,14 @@
 import React from 'react';
-import { Monitor, Cpu, Shield, Code, Layers, Radio, MousePointer } from 'lucide-react';
+import { Monitor, Cpu, Shield, Code, Layers, Radio, MousePointer, Download } from 'lucide-react';
 
-export type ActiveTab = 'host' | 'client' | 'sandbox' | 'protocol' | 'blueprints' | 'security';
+export type ActiveTab =
+  | 'host'
+  | 'client'
+  | 'downloads'
+  | 'sandbox'
+  | 'protocol'
+  | 'blueprints'
+  | 'security';
 
 interface HeaderProps {
   activeTab: ActiveTab;
@@ -21,6 +28,12 @@ export const Header: React.FC<HeaderProps> = ({ activeTab, setActiveTab }) => {
       label: 'Client (Remote Control)',
       icon: MousePointer,
       badge: 'Phase 2',
+    },
+    {
+      id: 'downloads' as ActiveTab,
+      label: 'Get the App',
+      icon: Download,
+      badge: 'Installers',
     },
     {
       id: 'sandbox' as ActiveTab,
@@ -63,7 +76,7 @@ export const Header: React.FC<HeaderProps> = ({ activeTab, setActiveTab }) => {
                   RemoteDesk
                 </span>
                 <span className="text-[11px] px-2 py-0.5 rounded-full font-mono font-semibold bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
-                  WebRTC + Electron
+                  v1.1.0
                 </span>
               </div>
               <p className="text-[11px] text-slate-400 font-medium tracking-wide">

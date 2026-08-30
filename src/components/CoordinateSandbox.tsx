@@ -1,23 +1,13 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import {
   calculateRemoteCoordinates,
-  getContainedVideoRect,
   BoundingBox,
 } from '../utils/coordinateMath';
 import { HostScreenMetadata, CoordinateTranslationResult } from '../types/remoteControl';
 import {
-  Maximize2,
-  Minimize2,
   MousePointer,
-  Crosshair,
-  Sliders,
   Sparkles,
   Info,
-  CheckCircle2,
-  AlertTriangle,
-  Layers,
-  ArrowRight,
-  Move,
   Monitor,
   Laptop,
 } from 'lucide-react';
@@ -555,7 +545,7 @@ export const CoordinateSandbox: React.FC = () => {
 
               {/* Host Footer info */}
               <div className="relative z-10 flex items-center justify-between text-[9px] font-mono text-slate-400 bg-[#090c18]/80 px-2 py-1 rounded border border-cyan-500/20">
-                <span>Logical (nut-js): {mathResult.hostLogicalX}pt, {mathResult.hostLogicalY}pt</span>
+                <span>Logical (OS points): {mathResult.hostLogicalX}pt, {mathResult.hostLogicalY}pt</span>
                 <span className="text-emerald-400 font-semibold">Status: Active Stream</span>
               </div>
             </div>
@@ -575,7 +565,7 @@ export const CoordinateSandbox: React.FC = () => {
                 </div>
               </div>
               <div className="p-2.5 rounded-xl bg-[#07080f] border border-cyan-500/15">
-                <div className="text-[11px] text-slate-400">Host Logical (nut-js)</div>
+                <div className="text-[11px] text-slate-400">Host Logical (OS points)</div>
                 <div className="font-mono font-bold text-sky-400 text-sm mt-0.5">
                   X: {mathResult.hostLogicalX}, Y: {mathResult.hostLogicalY}
                 </div>

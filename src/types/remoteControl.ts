@@ -2,7 +2,7 @@ export interface HostScreenMetadata {
   width: number;             // Physical width in pixels (e.g., 3840, 2560, 1920)
   height: number;            // Physical height in pixels (e.g., 2160, 1440, 1080)
   devicePixelRatio: number;  // Host OS scale factor (e.g., 1.0, 1.25, 1.5, 2.0)
-  displayId?: string;        // Electron display identifier
+  displayId?: string;        // Host display identifier, e.g. "display-0"
 }
 
 export interface ClientVideoRect {
@@ -32,7 +32,7 @@ export interface CoordinateTranslationResult {
   // Absolute Target Coordinates on Host Machine
   hostPhysicalX: number;
   hostPhysicalY: number;
-  // Scaled coordinates for OS APIs like nut-js when targeting logical points
+  // Scaled coordinates for OS injection APIs that target logical points
   hostLogicalX: number;
   hostLogicalY: number;
 }
@@ -140,12 +140,14 @@ export interface AnnotationStroke {
 }
 
 export interface WebRTCStats {
-  roundTripTimeMs: number;
+  roundTripTimeMs?: number;
+  rttMs?: number;
   fps: number;
   bitrateKbps: number;
-  jitterMs: number;
+  jitterMs?: number;
   packetsSent: number;
   packetsReceived: number;
+  resolution?: { width: number; height: number };
 }
 
 export interface AnnotationPoint {
@@ -227,3 +229,13 @@ export interface SignalingMessage {
   pin?: string;
   data?: any;
 }
+
+/**
+ * Kill-switch tuning, mirrored from `src-tauri/src/input.rs`.
+ *
+ * The Rust host is authoritative — these constants exist so the UI describes
+ * the real behaviour instead of hardcoding numbers that quietly drift from it.
+ * Change them here and in `input.rs` together.
+ */
+export const KILL_SWITCH_COOLDOWN_MS = 2_500;
+export const PHYSICAL_MOVEMENT_THRESHOLD_PX = 12;

@@ -5,6 +5,7 @@ import {
   FileTransferCancelPayload,
   RemoteControlPacket,
 } from '../types/remoteControl';
+import { tauriSaveFile } from './tauriBridge';
 
 export const DEFAULT_CHUNK_SIZE = 32 * 1024; // 32 KB per chunk for optimal WebRTC buffer throughput
 export const MAX_BUFFERED_AMOUNT = 256 * 1024; // 256 KB threshold for backpressure throttling
@@ -261,12 +262,11 @@ export class FileTransferManager {
 
         this.notify();
 
-        // Optional Electron auto-save if running in Electron environment
-        if (typeof window !== 'undefined' && window.electronAPI?.saveFile) {
-          blob.arrayBuffer().then((buf) => {
-            window.electronAPI?.saveFile?.(transfer.fileName, buf);
-          });
-        }
+        // In the desktop app, offer a real save dialog: a webview blob download
+        // is unreliable there. The download URL above stays as the fallback.
+        blob.arrayBuffer().then((buf) => {
+          void tauriSaveFile(transfer.fileName, buf);
+        });
         return true;
       }
     }

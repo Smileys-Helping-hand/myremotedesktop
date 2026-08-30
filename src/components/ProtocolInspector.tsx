@@ -10,12 +10,6 @@ import {
   Zap,
   Send,
   Activity,
-  CheckCircle2,
-  Layers,
-  ArrowRight,
-  Database,
-  Gauge,
-  Sparkles,
 } from 'lucide-react';
 
 export const ProtocolInspector: React.FC = () => {
@@ -29,7 +23,7 @@ export const ProtocolInspector: React.FC = () => {
   // Streaming simulated packet feed
   const [packetLog, setPacketLog] = useState<Array<{ id: number; packet: RemoteControlPacket; channel: 'Unreliable (UDP-like)' | 'Reliable (TCP-like)'; byteSize: number }>>([]);
   const [isLiveStreaming, setIsLiveStreaming] = useState<boolean>(false);
-  const [packetsPerSec, setPacketsPerSec] = useState<number>(60);
+  const [packetsPerSec] = useState<number>(60);
 
   // Generate current packet object
   const currentPacket: RemoteControlPacket = React.useMemo(() => {

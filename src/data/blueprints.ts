@@ -2,7 +2,7 @@ export interface BlueprintFile {
   id: string;
   filename: string;
   title: string;
-  category: 'Electron' | 'Signaling' | 'Math' | 'WebRTC' | 'Setup';
+  category: 'Native' | 'Signaling' | 'Math' | 'WebRTC' | 'Setup';
   description: string;
   language: string;
   code: string;
@@ -14,261 +14,139 @@ export const BLUEPRINT_FILES: BlueprintFile[] = [
     filename: 'setup-guide.md',
     title: '1. Project Scaffold & Dependencies',
     category: 'Setup',
-    description: 'Terminal commands, Electron + Vite setup, and package.json configuration with native build tools.',
+    description: 'Toolchain, per-OS build dependencies, and the packaging commands that produce Windows and Linux installers.',
     language: 'markdown',
-    code: `# Project Initialization & Setup Guide
+    code: `# Build & Packaging Guide
 
-## Step 1: Scaffold Vite + React + Electron + TypeScript
+## Prerequisites
+
+- Node.js 20+
+- A Rust toolchain (https://rustup.rs)
+
+Windows additionally needs the WebView2 Runtime, which ships with Windows 11 and
+current Windows 10. Nothing else.
+
+Debian/Ubuntu needs the webview and the input-injection backends:
+
 \`\`\`bash
-# Create directory and initialize project
-mkdir remotedesk-app && cd remotedesk-app
-npm init -y
-
-# Install Core Frontend Dependencies
-npm install react react-dom lucide-react socket.io-client
-npm install -D vite @vitejs/plugin-react typescript @types/react @types/react-dom tailwindcss @tailwindcss/vite
-
-# Install Electron & Native OS Automation Tooling
-npm install electron-is-dev
-npm install @nut-tree/nut-js
-npm install -D electron electron-builder @types/node concurrently cross-env tsx esbuild
+sudo apt-get install -y \\
+  libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \\
+  librsvg2-dev libxkbcommon-dev libwayland-dev libdbus-1-dev \\
+  libssl-dev build-essential
 \`\`\`
 
-## Step 2: Configure Native Module Rebuilding for \`@nut-tree/nut-js\`
-\`@nut-tree/nut-js\` relies on native C++ bindings for libuiohook / OS accessibility APIs.
-Add this script to your \`package.json\`:
+## Install and run
 
-\`\`\`json
-{
-  "name": "remotedesk-app",
-  "version": "1.0.0",
-  "main": "dist-electron/main.js",
-  "scripts": {
-    "dev": "concurrently -k \\"vite\\" \\"tsx watch electron/main.ts\\"",
-    "build:electron": "esbuild electron/main.ts --bundle --platform=node --outfile=dist-electron/main.js --external:electron --external:@nut-tree/nut-js && esbuild electron/preload.ts --bundle --platform=node --outfile=dist-electron/preload.js --external:electron",
-    "build": "vite build && npm run build:electron && electron-builder",
-    "postinstall": "electron-builder install-app-deps"
-  }
+\`\`\`bash
+npm install
+npm run dev          # Tauri dev: Rust host + Vite frontend
+\`\`\`
+
+The app embeds its own signaling server, so nothing else has to be running.
+
+## Key dependencies
+
+\`\`\`jsonc
+// package.json - the frontend has no signaling library at all; the client is
+// ~200 lines of WebSocket in src/utils/signaling.ts.
+"dependencies": {
+  "@tauri-apps/api": "^2.1.1",
+  "react": "^19.0.1",
+  "lucide-react": "^0.546.0"
 }
 \`\`\`
 
-## Step 3: Signaling Server Initialization
-In a separate backend folder (or sub-package):
-\`\`\`bash
-mkdir signaling-server && cd signaling-server
-npm init -y
-npm install express socket.io cors dotenv
-npm install -D typescript @types/express @types/node @types/cors tsx
+\`\`\`toml
+# src-tauri/Cargo.toml
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+enigo = "0.6"                     # OS-level input injection
+axum = { version = "0.8", features = ["ws", "json"] }   # embedded signaling
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time"] }
+
+# enigo defaults to X11 only. wayland adds the wlroots virtual-input protocols
+# and libei_tokio the portal-based route, together covering the mainstream
+# Wayland compositors. webkit2gtk is needed to switch on the webview settings
+# that screen capture depends on.
+[target.'cfg(target_os = "linux")'.dependencies]
+enigo = { version = "0.6", features = ["wayland", "libei_tokio"] }
+webkit2gtk = { version = "=2.0.2", features = ["v2_38"] }
 \`\`\`
+
+## Package installers
+
+\`\`\`bash
+npm run package
+\`\`\`
+
+Tauri builds for the machine it runs on: NSIS \`.exe\` on Windows,
+\`.deb\` / \`.rpm\` / \`.AppImage\` on Linux. Output lands in
+\`src-tauri/target/release/bundle/\`.
+
+## Checks
+
+\`\`\`bash
+npm run lint             # tsc (app + server) and clippy -D warnings
+npm test                 # frontend unit tests
+npm run test:rust        # Rust unit tests
+npm run check:signaling  # protocol conformance against a running server
+\`\`\`
+
+The conformance suite runs against either signaling implementation - the
+embedded Rust one or the standalone Node relay - which is what keeps a Windows
+host and a Linux client speaking the same protocol.
 `
   },
   {
     id: 'signaling-server',
-    filename: 'server/signalingServer.ts',
-    title: '2. Node.js + Socket.io Signaling Server',
+    filename: 'src-tauri/src/signaling.rs',
+    title: '2. Embedded Signaling Server (Rust)',
     category: 'Signaling',
-    description: 'Production-ready WebRTC signaling server handling Room lifecycle, Session IDs, SDP Offer/Answer relay, and ICE candidate trickling with STUN/TURN fallback.',
-    language: 'typescript',
-    code: `import express from 'express';
-import http from 'http';
-import { Server, Socket } from 'socket.io';
-import cors from 'cors';
+    description: 'The rendezvous point carrying SDP offers, answers and ICE candidates between peers. It runs inside the app itself, so an installed RemoteDesk can host with no other process running. Media never passes through it.',
+    language: 'rust',
+    code: `// Wire protocol: {"event": string, "data": value} as JSON over a WebSocket
+// at /rtc. src/utils/signaling.ts is the matching client, and server/index.ts
+// is an optional standalone relay speaking the same protocol.
 
-const app = express();
-app.use(cors());
-app.use(express.json());
-
-const server = http.createServer(app);
-const io = new Server(server, {
-  cors: {
-    origin: '*',
-    methods: ['GET', 'POST'],
-  },
-  pingInterval: 10000,
-  pingTimeout: 5000,
-});
-
-const PORT = process.env.PORT || 4000;
-
-interface RoomSession {
-  roomId: string;
-  hostSocketId: string;
-  clientSocketId: string | null;
-  createdAt: number;
-  hostMetadata?: {
-    width: number;
-    height: number;
-    devicePixelRatio: number;
-  };
+struct Room {
+    room_id: String,
+    host: PeerId,
+    clients: HashSet<PeerId>,
+    /// AnyDesk-style plug-and-play: clients are admitted without prompting.
+    unattended: bool,
+    pin: Option<String>,
 }
 
-// Active Sessions Store
-const rooms = new Map<string, RoomSession>();
-const socketToRoom = new Map<string, string>();
-
-/**
- * WebRTC Public STUN & TURN Infrastructure Configuration
- */
-export const ICE_SERVERS_CONFIG: RTCConfiguration = {
-  iceServers: [
-    // Free Public Google STUN servers (Primary for NAT discovery)
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    
-    // TURN Server Stub (Required for Symmetric NAT / Strict Corporate Firewalls)
-    // In production, provision coturn (e.g. on AWS EC2 or Twilio Network Traversal)
-    {
-      urls: 'turn:turn.example.com:3478?transport=udp',
-      username: process.env.TURN_USERNAME || 'remote_guest',
-      credential: process.env.TURN_PASSWORD || 'turn_secret_token_123',
-    },
-  ],
-  iceCandidatePoolSize: 10,
-};
-
-app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    activeRooms: rooms.size,
-    timestamp: Date.now(),
-  });
-});
-
-app.get('/api/ice-servers', (req, res) => {
-  res.json(ICE_SERVERS_CONFIG);
-});
-
-io.on('connection', (socket: Socket) => {
-  console.log(\`[Signaling] Socket connected: \${socket.id}\`);
-
-  // 1. Host creates a unique 6-digit or UUID Session ID
-  socket.on('create-room', ({ roomId, hostMetadata }, callback) => {
-    if (rooms.has(roomId)) {
-      callback({ success: false, message: 'Room ID already in use.' });
-      return;
-    }
-
-    const session: RoomSession = {
-      roomId,
-      hostSocketId: socket.id,
-      clientSocketId: null,
-      createdAt: Date.now(),
-      hostMetadata,
+/// Resolves who should receive a signaling frame from peer_id. Both frame
+/// shapes go through this, so the room-membership check cannot be bypassed by
+/// using the other one.
+fn signal_targets(hub: &Hub, peer_id: &str, target_id: Option<&str>) -> (Vec<PeerId>, String) {
+    let Some(room) = hub.room_of(peer_id) else {
+        return (Vec::new(), String::new());
     };
+    let room_id = room.room_id.clone();
 
-    rooms.set(roomId, session);
-    socketToRoom.set(socket.id, roomId);
-    socket.join(roomId);
-
-    console.log(\`[Signaling] Room created: \${roomId} by Host: \${socket.id}\`);
-    callback({ success: true, roomId, iceServers: ICE_SERVERS_CONFIG });
-  });
-
-  // 2. Client joins the Session ID
-  socket.on('join-room', ({ roomId }, callback) => {
-    const session = rooms.get(roomId);
-    if (!session) {
-      callback({ success: false, message: 'Session ID not found or expired.' });
-      return;
+    if let Some(target) = target_id {
+        // Only ever address a peer that is actually in the same room.
+        let is_peer = room.host == target || room.clients.contains(target);
+        let targets = if is_peer { vec![target.to_string()] } else { Vec::new() };
+        return (targets, room_id);
     }
 
-    if (session.clientSocketId && session.clientSocketId !== socket.id) {
-      callback({ success: false, message: 'Session is full. Another client is connected.' });
-      return;
-    }
+    // Untargeted frames go to the opposite role.
+    let targets = if room.host == peer_id {
+        room.clients.iter().cloned().collect()
+    } else {
+        vec![room.host.clone()]
+    };
+    (targets, room_id)
+}
 
-    session.clientSocketId = socket.id;
-    socketToRoom.set(socket.id, roomId);
-    socket.join(roomId);
-
-    console.log(\`[Signaling] Client \${socket.id} joined Room \${roomId}\`);
-
-    // Notify Host that Client is ready for WebRTC Offer
-    io.to(session.hostSocketId).emit('client-joined', {
-      clientId: socket.id,
-    });
-
-    callback({
-      success: true,
-      roomId,
-      hostMetadata: session.hostMetadata,
-      iceServers: ICE_SERVERS_CONFIG,
-    });
-  });
-
-  // 3. WebRTC SDP Offer Relay (Host -> Client or Client -> Host)
-  socket.on('sdp-offer', ({ roomId, sdp }) => {
-    const session = rooms.get(roomId);
-    if (!session) return;
-
-    const targetSocketId = socket.id === session.hostSocketId ? session.clientSocketId : session.hostSocketId;
-    if (targetSocketId) {
-      io.to(targetSocketId).emit('sdp-offer', { sdp, senderId: socket.id });
-    }
-  });
-
-  // 4. WebRTC SDP Answer Relay (Client -> Host)
-  socket.on('sdp-answer', ({ roomId, sdp }) => {
-    const session = rooms.get(roomId);
-    if (!session) return;
-
-    const targetSocketId = socket.id === session.hostSocketId ? session.clientSocketId : session.hostSocketId;
-    if (targetSocketId) {
-      io.to(targetSocketId).emit('sdp-answer', { sdp, senderId: socket.id });
-    }
-  });
-
-  // 5. ICE Candidate Trickling Relay
-  socket.on('ice-candidate', ({ roomId, candidate }) => {
-    const session = rooms.get(roomId);
-    if (!session) return;
-
-    const targetSocketId = socket.id === session.hostSocketId ? session.clientSocketId : session.hostSocketId;
-    if (targetSocketId) {
-      io.to(targetSocketId).emit('ice-candidate', { candidate, senderId: socket.id });
-    }
-  });
-
-  // 6. Host Screen Resolution / Scale Update
-  socket.on('update-host-metadata', ({ roomId, metadata }) => {
-    const session = rooms.get(roomId);
-    if (session && socket.id === session.hostSocketId) {
-      session.hostMetadata = metadata;
-      if (session.clientSocketId) {
-        io.to(session.clientSocketId).emit('host-metadata-updated', metadata);
-      }
-    }
-  });
-
-  // 7. Cleanup on Disconnect
-  socket.on('disconnect', () => {
-    const roomId = socketToRoom.get(socket.id);
-    if (!roomId) return;
-
-    const session = rooms.get(roomId);
-    if (session) {
-      if (socket.id === session.hostSocketId) {
-        // Host disconnected: notify client and close room
-        if (session.clientSocketId) {
-          io.to(session.clientSocketId).emit('peer-disconnected', { reason: 'Host closed session.' });
-        }
-        rooms.delete(roomId);
-      } else if (socket.id === session.clientSocketId) {
-        // Client disconnected: reset client slot and inform host
-        session.clientSocketId = null;
-        io.to(session.hostSocketId).emit('peer-disconnected', { reason: 'Client disconnected.' });
-      }
-    }
-
-    socketToRoom.delete(socket.id);
-    console.log(\`[Signaling] Socket disconnected: \${socket.id}\`);
-  });
-});
-
-server.listen(PORT, () => {
-  console.log(\`⚡ [Signaling Server] Running on http://localhost:\${PORT}\`);
-});
+/// Binds 4000, walking up to 4009 so a second instance on the same machine
+/// still comes up. The bound port is reported to the frontend at startup.
+pub fn start() -> Result<SignalingHandle, String> {
+    // axum router: /healthz, /network-info, /api/tunnel/start, /rtc
+}
 `
   },
   {
@@ -409,7 +287,7 @@ export function calculateRemoteCoordinates(
   const hostPhysicalX = Math.round(normalizedX * hostWidth);
   const hostPhysicalY = Math.round(normalizedY * hostHeight);
 
-  // 8. Project onto Host Logical Points (for nut-js OS automation on High-DPI screens)
+  // 8. Project onto Host Logical Points (for OS injection on High-DPI screens)
   const hostLogicalX = Math.round(hostPhysicalX / hostDPR);
   const hostLogicalY = Math.round(hostPhysicalY / hostDPR);
 
@@ -434,386 +312,116 @@ export function calculateRemoteCoordinates(
 `
   },
   {
-    id: 'electron-main',
-    filename: 'electron/main.ts',
-    title: '4. Electron Main Process & Input Injection Engine',
-    category: 'Electron',
-    description: 'Production Electron main process integrating @nut-tree/nut-js OS automation, native mouse/keyboard injection, Kill-Switch safety override, and screen capture sources.',
-    language: 'typescript',
-    code: `import { app, BrowserWindow, ipcMain, desktopCapturer, screen, dialog } from 'electron';
-import path from 'path';
-import isDev from 'electron-is-dev';
-import { mouse, keyboard, Key, Button, Point } from '@nut-tree/nut-js';
+    id: 'native-input',
+    filename: 'src-tauri/src/input.rs',
+    title: '4. Native Input Injection & Authorization Gate (Rust)',
+    category: 'Native',
+    description: 'OS-level mouse and keyboard injection via enigo, behind the security boundary of the whole app: two pieces of state the webview cannot reach gate every single injection.',
+    language: 'rust',
+    code: `/// How long remote injection stays suspended after physical host input.
+pub const KILL_SWITCH_COOLDOWN_MS: u64 = 2_500;
 
-// Configure @nut-tree/nut-js for ultra-low latency input injection
-mouse.config.autoDelayMs = 0;
-mouse.config.mouseSpeed = 1000;
-keyboard.config.autoDelayMs = 0;
+/// Cursor displacement that counts as deliberate physical movement rather than
+/// rounding drift from our own injection.
+const PHYSICAL_MOVEMENT_THRESHOLD_PX: i32 = 12;
 
-let mainWindow: BrowserWindow | null = null;
-
-// Remote Control Permission State
-let isRemoteControlAllowed = false;
-let activeRemoteClientId: string | null = null;
-
-// ============================================================================
-// KILL-SWITCH SAFETY SYSTEM
-// ============================================================================
-// If the Host physically moves their physical mouse, immediately suspend remote
-// inputs for 2000ms to allow the Host to regain full OS control.
-let isInputSuspended = false;
-let suspendUntil = 0;
-let lastKnownHostMousePos: { x: number; y: number } | null = null;
-const SUSPEND_DURATION_MS = 2000;
-
-function startHostKillSwitchMonitor() {
-  setInterval(async () => {
-    try {
-      const currentPos = screen.getCursorScreenPoint();
-      if (lastKnownHostMousePos) {
-        const dx = Math.abs(currentPos.x - lastKnownHostMousePos.x);
-        const dy = Math.abs(currentPos.y - lastKnownHostMousePos.y);
-
-        // Host moved mouse manually (threshold > 15px to avoid jitter)
-        if ((dx > 15 || dy > 15) && !isInjectingInput) {
-          const now = Date.now();
-          suspendUntil = now + SUSPEND_DURATION_MS;
-          isInputSuspended = true;
-
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('kill-switch-triggered', {
-              suspendedUntil: suspendUntil,
-            });
-          }
+impl InputState {
+    /// The single gate every injection passes through. A compromised or buggy
+    /// renderer cannot inject input the host has not authorized.
+    fn authorize(&self) -> Result<(), String> {
+        if !self.control_enabled.load(Ordering::SeqCst) {
+            return Err("remote control is not authorized by the host".into());
         }
-      }
-      lastKnownHostMousePos = currentPos;
-    } catch (err) {
-      console.error('Kill switch poll error:', err);
+        let remaining = self.suspended_remaining_ms();
+        if remaining > 0 {
+            return Err(format!("kill switch active - suspended for {remaining}ms"));
+        }
+        Ok(())
     }
-  }, 100);
+
+    /// Projects normalized [0,1] stream coordinates onto absolute desktop
+    /// pixels, so the client never needs to know the host resolution.
+    fn resolve(&self, norm_x: f64, norm_y: f64) -> (i32, i32) {
+        let rect = self.target();
+        let nx = norm_x.clamp(0.0, 1.0);
+        let ny = norm_y.clamp(0.0, 1.0);
+        // Subtract one pixel so norm = 1.0 lands on the last addressable pixel
+        // rather than one past the edge of the monitor.
+        let x = rect.x + (nx * (rect.width - 1).max(0) as f64).round() as i32;
+        let y = rect.y + (ny * (rect.height - 1).max(0) as f64).round() as i32;
+        (x, y)
+    }
+
+    pub fn move_mouse(&self, norm_x: f64, norm_y: f64) -> Result<(), String> {
+        self.authorize()?;
+        let (x, y) = self.resolve(norm_x, norm_y);
+        self.with_enigo(|e| {
+            e.move_mouse(x, y, Coordinate::Abs)
+                .map_err(|err| format!("move_mouse failed: {err}"))
+        })?;
+        self.remember_injected(x, y);
+        Ok(())
+    }
+
+    /// Reads the live cursor and reports whether it diverged from where we last
+    /// put it - i.e. whether a human at the host machine moved the mouse.
+    pub fn detect_physical_movement(&self) -> Option<(i32, i32)> {
+        let expected_x = self.last_injected_x.load(Ordering::SeqCst);
+        let expected_y = self.last_injected_y.load(Ordering::SeqCst);
+        let (ax, ay) = self.with_enigo(|e| e.location().map_err(|e| e.to_string())).ok()?;
+
+        if (ax - expected_x).abs() >= PHYSICAL_MOVEMENT_THRESHOLD_PX
+            || (ay - expected_y).abs() >= PHYSICAL_MOVEMENT_THRESHOLD_PX
+        {
+            // Re-baseline so one physical nudge does not retrigger every poll.
+            self.remember_injected(ax, ay);
+            return Some((ax, ay));
+        }
+        None
+    }
 }
-
-let isInjectingInput = false;
-
-function checkKillSwitch(): boolean {
-  if (Date.now() < suspendUntil) {
-    return true; // Input is suspended
-  }
-  isInputSuspended = false;
-  return false;
-}
-
-// ============================================================================
-// ELECTRON WINDOW CREATION
-// ============================================================================
-function createWindow() {
-  mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 800,
-    minWidth: 960,
-    minHeight: 600,
-    title: 'RemoteDesk - Ultra-Low Latency Remote Access',
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,       // CRITICAL: Prevent XSS from accessing Node APIs
-      nodeIntegration: false,        // CRITICAL: Disable Node in renderer
-      sandbox: false,                // Needed for preload IPC bridge
-      webSecurity: true,
-    },
-  });
-
-  const url = isDev
-    ? 'http://localhost:3000'
-    : \`file://\${path.join(__dirname, '../dist/index.html')}\`;
-
-  mainWindow.loadURL(url);
-
-  if (isDev) {
-    mainWindow.webContents.openDevTools({ mode: 'detach' });
-  }
-
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
-
-  startHostKillSwitchMonitor();
-}
-
-app.whenReady().then(createWindow);
-
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
-});
-
-// ============================================================================
-// IPC HANDLERS: SCREEN CAPTURE & METADATA
-// ============================================================================
-
-// 1. Get Primary Display Resolution & DPI scale
-ipcMain.handle('get-primary-display-metadata', () => {
-  const primaryDisplay = screen.getPrimaryDisplay();
-  return {
-    width: primaryDisplay.size.width * primaryDisplay.scaleFactor, // Physical width
-    height: primaryDisplay.size.height * primaryDisplay.scaleFactor, // Physical height
-    logicalWidth: primaryDisplay.size.width,
-    logicalHeight: primaryDisplay.size.height,
-    devicePixelRatio: primaryDisplay.scaleFactor,
-    id: primaryDisplay.id.toString(),
-  };
-});
-
-// 2. Get Desktop Capture Sources for WebRTC Screen Share
-ipcMain.handle('get-screen-sources', async () => {
-  const sources = await desktopCapturer.getSources({
-    types: ['screen', 'window'],
-    thumbnailSize: { width: 480, height: 270 },
-  });
-
-  return sources.map((src) => ({
-    id: src.id,
-    name: src.name,
-    thumbnail: src.thumbnail.toDataURL(),
-    displayId: src.display_id,
-  }));
-});
-
-// 3. Security: Host Permission Dialog for Remote Control
-ipcMain.handle('request-remote-permission', async (event, { clientName, clientId }) => {
-  if (!mainWindow) return false;
-
-  const result = await dialog.showMessageBox(mainWindow, {
-    type: 'question',
-    buttons: ['Accept & Grant Control', 'Deny'],
-    defaultId: 0,
-    cancelId: 1,
-    title: 'Remote Control Request',
-    message: \`Incoming Remote Control Request\`,
-    detail: \`"\${clientName || 'Remote Client'}" is requesting control of your keyboard and mouse.\\n\\nYou can override control at any time by moving your mouse.\`,
-  });
-
-  isRemoteControlAllowed = result.response === 0;
-  if (isRemoteControlAllowed) {
-    activeRemoteClientId = clientId;
-  }
-  return isRemoteControlAllowed;
-});
-
-ipcMain.handle('revoke-remote-permission', () => {
-  isRemoteControlAllowed = false;
-  activeRemoteClientId = null;
-  return true;
-});
-
-// ============================================================================
-// IPC HANDLERS: OS AUTOMATION INPUT INJECTION (@nut-tree/nut-js)
-// ============================================================================
-
-// Map JS button strings to nut-js Button enums
-function getNutButton(button: 'left' | 'middle' | 'right'): Button {
-  switch (button) {
-    case 'middle': return Button.MIDDLE;
-    case 'right': return Button.RIGHT;
-    default: return Button.LEFT;
-  }
-}
-
-// Map Web standard KeyboardEvent.code to nut-js Key enums
-function mapKeyCodeToNutKey(code: string): Key | null {
-  const codeMap: Record<string, Key> = {
-    'KeyA': Key.A, 'KeyB': Key.B, 'KeyC': Key.C, 'KeyD': Key.D, 'KeyE': Key.E,
-    'KeyF': Key.F, 'KeyG': Key.G, 'KeyH': Key.H, 'KeyI': Key.I, 'KeyJ': Key.J,
-    'KeyK': Key.K, 'KeyL': Key.L, 'KeyM': Key.M, 'KeyN': Key.N, 'KeyO': Key.O,
-    'KeyP': Key.P, 'KeyQ': Key.Q, 'KeyR': Key.R, 'KeyS': Key.S, 'KeyT': Key.T,
-    'KeyU': Key.U, 'KeyV': Key.V, 'KeyW': Key.W, 'KeyX': Key.X, 'KeyY': Key.Y,
-    'KeyZ': Key.Z,
-    'Digit0': Key.Num0, 'Digit1': Key.Num1, 'Digit2': Key.Num2, 'Digit3': Key.Num3,
-    'Digit4': Key.Num4, 'Digit5': Key.Num5, 'Digit6': Key.Num6, 'Digit7': Key.Num7,
-    'Digit8': Key.Num8, 'Digit9': Key.Num9,
-    'Enter': Key.Enter, 'Escape': Key.Escape, 'Backspace': Key.Backspace,
-    'Tab': Key.Tab, 'Space': Key.Space, 'ArrowUp': Key.Up, 'ArrowDown': Key.Down,
-    'ArrowLeft': Key.Left, 'ArrowRight': Key.Right, 'ControlLeft': Key.LeftControl,
-    'ControlRight': Key.RightControl, 'ShiftLeft': Key.LeftShift, 'ShiftRight': Key.RightShift,
-    'AltLeft': Key.LeftAlt, 'AltRight': Key.RightAlt, 'MetaLeft': Key.LeftSuper,
-    'MetaRight': Key.RightSuper,
-  };
-  return codeMap[code] ?? null;
-}
-
-// 1. Mouse Movement Handler (Sub-millisecond direct injection)
-ipcMain.on('inject-mouse-move', async (event, { x, y }) => {
-  if (!isRemoteControlAllowed || checkKillSwitch()) return;
-
-  try {
-    isInjectingInput = true;
-    const targetPoint = new Point(Math.round(x), Math.round(y));
-    await mouse.setPosition(targetPoint);
-    lastKnownHostMousePos = { x: targetPoint.x, y: targetPoint.y };
-  } catch (err) {
-    console.error('Error injecting mouse move:', err);
-  } finally {
-    isInjectingInput = false;
-  }
-});
-
-// 2. Mouse Click / Mouse Down / Mouse Up Handler
-ipcMain.on('inject-mouse-button', async (event, { type, button, clicks, x, y }) => {
-  if (!isRemoteControlAllowed || checkKillSwitch()) return;
-
-  try {
-    isInjectingInput = true;
-    if (typeof x === 'number' && typeof y === 'number') {
-      await mouse.setPosition(new Point(Math.round(x), Math.round(y)));
-      lastKnownHostMousePos = { x: Math.round(x), y: Math.round(y) };
-    }
-
-    const nutBtn = getNutButton(button);
-
-    if (type === 'MOUSE_DOWN') {
-      await mouse.pressButton(nutBtn);
-    } else if (type === 'MOUSE_UP') {
-      await mouse.releaseButton(nutBtn);
-      if (clicks === 2) {
-        await mouse.doubleClick(nutBtn);
-      }
-    }
-  } catch (err) {
-    console.error('Error injecting mouse button:', err);
-  } finally {
-    isInjectingInput = false;
-  }
-});
-
-// 3. Mouse Wheel Scroll Handler
-ipcMain.on('inject-mouse-wheel', async (event, { deltaX, deltaY }) => {
-  if (!isRemoteControlAllowed || checkKillSwitch()) return;
-
-  try {
-    isInjectingInput = true;
-    if (deltaY > 0) {
-      await mouse.scrollDown(Math.abs(Math.round(deltaY / 20)));
-    } else if (deltaY < 0) {
-      await mouse.scrollUp(Math.abs(Math.round(deltaY / 20)));
-    }
-    if (deltaX > 0) {
-      await mouse.scrollRight(Math.abs(Math.round(deltaX / 20)));
-    } else if (deltaX < 0) {
-      await mouse.scrollLeft(Math.abs(Math.round(deltaX / 20)));
-    }
-  } catch (err) {
-    console.error('Error injecting mouse wheel:', err);
-  } finally {
-    isInjectingInput = false;
-  }
-});
-
-// 4. Keyboard Keystroke Handler
-ipcMain.on('inject-keyboard', async (event, { type, code }) => {
-  if (!isRemoteControlAllowed || checkKillSwitch()) return;
-
-  try {
-    const nutKey = mapKeyCodeToNutKey(code);
-    if (!nutKey) return;
-
-    if (type === 'KEY_DOWN') {
-      await keyboard.pressKey(nutKey);
-    } else if (type === 'KEY_UP') {
-      await keyboard.releaseKey(nutKey);
-    }
-  } catch (err) {
-    console.error('Error injecting keyboard key:', err);
-  }
-});
 `
   },
   {
-    id: 'electron-preload',
-    filename: 'electron/preload.ts',
-    title: '5. Electron Preload Script (ContextBridge IPC)',
-    category: 'Electron',
-    description: 'Strictly-typed IPC bridge exposing native desktopCapturer sources, primary display resolution, and OS input injection to the React renderer securely.',
-    language: 'typescript',
-    code: `import { contextBridge, ipcRenderer } from 'electron';
+    id: 'platform-capabilities',
+    filename: 'src-tauri/src/platform.rs',
+    title: '5. Per-Platform Webview & Capability Setup (Rust)',
+    category: 'Native',
+    description: 'Capture and injection have materially different constraints per OS, and on Linux per display server. This enables what the Linux webview needs and reports what is actually detectable at runtime, rather than asserting capabilities it cannot verify.',
+    language: 'rust',
+    code: `// WebKitGTK ships enable-media-stream and enable-webrtc OFF by default, and
+// neither Tauri nor wry turns them on. Without this, navigator.mediaDevices and
+// RTCPeerConnection simply do not exist in the Linux webview, so a Linux machine
+// can neither host nor connect. Windows (WebView2) needs none of it.
+#[cfg(target_os = "linux")]
+fn enable_linux_media_capture(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("main") else { return };
 
-export interface ScreenSource {
-  id: string;
-  name: string;
-  thumbnail: string;
-  displayId?: string;
+    let _ = window.with_webview(|webview| {
+        use webkit2gtk::{SettingsExt, WebViewExt};
+        if let Some(settings) = WebViewExt::settings(&webview.inner()) {
+            settings.set_enable_media_stream(true);
+            settings.set_enable_mediasource(true);
+            settings.set_enable_webrtc(true);
+        }
+    });
 }
 
-export interface HostDisplayMetadata {
-  width: number;
-  height: number;
-  logicalWidth: number;
-  logicalHeight: number;
-  devicePixelRatio: number;
-  id: string;
-}
+#[cfg(target_os = "linux")]
+fn linux_diagnostics() -> Diagnostics {
+    let is_wayland = std::env::var("XDG_SESSION_TYPE").unwrap_or_default() == "wayland"
+        || std::env::var("WAYLAND_DISPLAY").is_ok();
 
-export const electronAPI = {
-  // Screen Sources
-  getScreenSources: (): Promise<ScreenSource[]> => {
-    return ipcRenderer.invoke('get-screen-sources');
-  },
-
-  // Display Resolution & Scale Factor
-  getPrimaryDisplayMetadata: (): Promise<HostDisplayMetadata> => {
-    return ipcRenderer.invoke('get-primary-display-metadata');
-  },
-
-  // Security Permissions
-  requestRemotePermission: (payload: { clientName: string; clientId: string }): Promise<boolean> => {
-    return ipcRenderer.invoke('request-remote-permission', payload);
-  },
-
-  revokeRemotePermission: (): Promise<boolean> => {
-    return ipcRenderer.invoke('revoke-remote-permission');
-  },
-
-  onKillSwitchTriggered: (callback: (data: { suspendedUntil: number }) => void) => {
-    const subscription = (_event: any, data: { suspendedUntil: number }) => callback(data);
-    ipcRenderer.on('kill-switch-triggered', subscription);
-    return () => ipcRenderer.removeListener('kill-switch-triggered', subscription);
-  },
-
-  // Input Injection (Called on Host when receiving WebRTC DataChannel packets)
-  injectMouseMove: (coords: { x: number; y: number }) => {
-    ipcRenderer.send('inject-mouse-move', coords);
-  },
-
-  injectMouseButton: (payload: {
-    type: 'MOUSE_DOWN' | 'MOUSE_UP';
-    button: 'left' | 'middle' | 'right';
-    clicks?: number;
-    x?: number;
-    y?: number;
-  }) => {
-    ipcRenderer.send('inject-mouse-button', payload);
-  },
-
-  injectMouseWheel: (payload: { deltaX: number; deltaY: number }) => {
-    ipcRenderer.send('inject-mouse-wheel', payload);
-  },
-
-  injectKeyboard: (payload: {
-    type: 'KEY_DOWN' | 'KEY_UP';
-    code: string;
-    key: string;
-  }) => {
-    ipcRenderer.send('inject-keyboard', payload);
-  },
-};
-
-// Expose safe, isolated API to React renderer window.electronAPI
-contextBridge.exposeInMainWorld('electronAPI', electronAPI);
-
-declare global {
-  interface Window {
-    electronAPI?: typeof electronAPI;
-  }
+    // Under Wayland there is no XTest. Injection goes through either the
+    // RemoteDesktop portal (GNOME, KDE) or the wlroots virtual-input protocols
+    // (Sway, Hyprland) - both compiled in, chosen at runtime.
+    let mut notes = Vec::new();
+    if is_wayland {
+        notes.push("Wayland: capture via xdg-desktop-portal and PipeWire.".to_string());
+    } else {
+        notes.push("X11: XTest injection needs no extra permission.".to_string());
+    }
+    // ...
 }
 `
   },
@@ -825,7 +433,7 @@ declare global {
     description: 'React custom hooks for establishing low-latency WebRTC peer connections, RTCDataChannel tuning (ordered vs unordered), and high-frequency input batching.',
     language: 'typescript',
     code: `import { useEffect, useRef, useState, useCallback } from 'react';
-import { io, Socket } from 'socket.io-client';
+import { io, Socket } from '../utils/signaling';
 import {
   RemoteControlPacket,
   HostScreenMetadata,

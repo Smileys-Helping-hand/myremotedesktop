@@ -3,7 +3,6 @@ import { motion, AnimatePresence } from 'motion/react';
 import {
   CheckCircle2,
   AlertTriangle,
-  Info,
   XCircle,
   X,
   ShieldAlert,

@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
-import { BLUEPRINT_FILES, BlueprintFile } from '../data/blueprints';
+import { BLUEPRINT_FILES } from '../data/blueprints';
 import {
-  Code,
   Copy,
   Check,
   Download,
@@ -9,7 +8,6 @@ import {
   FolderTree,
   Terminal,
   Server,
-  Layers,
   Shield,
   Cpu,
   Monitor,
@@ -22,7 +20,7 @@ export const BlueprintsViewer: React.FC = () => {
 
   const selectedFile = BLUEPRINT_FILES.find((f) => f.id === selectedFileId) || BLUEPRINT_FILES[0];
 
-  const categories = ['All', 'Setup', 'Signaling', 'Math', 'Electron', 'WebRTC'];
+  const categories = ['All', 'Setup', 'Signaling', 'Math', 'Native', 'WebRTC'];
 
   const filteredFiles = activeCategory === 'All'
     ? BLUEPRINT_FILES
@@ -51,7 +49,7 @@ export const BlueprintsViewer: React.FC = () => {
       case 'Setup': return Terminal;
       case 'Signaling': return Server;
       case 'Math': return Monitor;
-      case 'Electron': return Shield;
+      case 'Native': return Shield;
       case 'WebRTC': return Cpu;
       default: return FileCode;
     }
@@ -78,7 +76,7 @@ export const BlueprintsViewer: React.FC = () => {
               </span>
             </h2>
             <p className="text-sm text-slate-300 max-w-3xl leading-relaxed">
-              Complete, production-tested code modules implementing the Electron main process, secure preload IPC context bridge, Socket.io signaling server, WebRTC video/DataChannel React hooks, and coordinate normalization math.
+              The modules this app is actually built from: the Rust host process that injects input and gates every injection, the embedded signaling server, per-platform webview setup, the WebRTC video and DataChannel hooks, and the coordinate normalization math.
             </p>
           </div>
 

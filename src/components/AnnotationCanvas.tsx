@@ -47,7 +47,7 @@ export const AnnotationCanvas: React.FC<AnnotationCanvasProps> = ({
   const animFrameIdRef = useRef<number | null>(null);
 
   const [selectedColor, setSelectedColor] = useState<string>('#06b6d4');
-  const [lineWidth, setLineWidth] = useState<number>(3);
+  const [lineWidth] = useState<number>(3);
   const [isDrawing, setIsDrawing] = useState<boolean>(false);
 
   // Handle incoming remote stroke from peer

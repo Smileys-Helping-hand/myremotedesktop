@@ -1,23 +1,17 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   Shield,
-  ShieldAlert,
-  ShieldCheck,
   MousePointer,
-  AlertTriangle,
   Lock,
-  Unlock,
   Power,
-  RefreshCw,
-  Eye,
   CheckCircle2,
-  XCircle,
 } from 'lucide-react';
+import { KILL_SWITCH_COOLDOWN_MS, PHYSICAL_MOVEMENT_THRESHOLD_PX } from '../types/remoteControl';
 
 export const SecurityKillSwitchDemo: React.FC = () => {
   // Permission State
   const [permissionStatus, setPermissionStatus] = useState<'pending' | 'granted' | 'denied'>('pending');
-  const [requestingClient, setRequestingClient] = useState<{ name: string; ip: string; id: string }>({
+  const [requestingClient] = useState<{ name: string; ip: string; id: string }>({
     name: 'Sarah (Remote Support)',
     ip: '192.168.1.42',
     id: 'client_7a9f21b',
@@ -38,7 +32,7 @@ export const SecurityKillSwitchDemo: React.FC = () => {
     const newY = Math.round(150 + Math.random() * 300);
     setHostPhysicalMousePos({ x: newX, y: newY });
     setIsSuspended(true);
-    setRemainingSuspendTimeMs(2000);
+    setRemainingSuspendTimeMs(KILL_SWITCH_COOLDOWN_MS);
     setOverrideCount((c) => c + 1);
 
     if (suspendTimerRef.current) {
@@ -46,7 +40,7 @@ export const SecurityKillSwitchDemo: React.FC = () => {
     }
 
     const startTime = Date.now();
-    const duration = 2000;
+    const duration = KILL_SWITCH_COOLDOWN_MS;
 
     suspendTimerRef.current = window.setInterval(() => {
       const elapsed = Date.now() - startTime;
@@ -116,7 +110,9 @@ export const SecurityKillSwitchDemo: React.FC = () => {
           </div>
 
           <p className="text-xs text-slate-300">
-            Before any <code className="text-cyan-300 bg-[#141829] px-1.5 py-0.5 rounded border border-cyan-500/20">@nut-tree/nut-js</code> IPC call is executed on the Host's OS, Electron spawns a native modal dialog (<code className="text-cyan-300 bg-[#141829] px-1.5 py-0.5 rounded border border-cyan-500/20">dialog.showMessageBox</code>).
+            Remote input is refused outright until the host operator grants control. The grant is
+            held in the Rust host process (<code className="text-cyan-300 bg-[#141829] px-1.5 py-0.5 rounded border border-cyan-500/20">set_control_enabled</code>), where the
+            webview cannot reach it — so a compromised renderer still cannot move the host's mouse.
           </p>
 
           {/* Native Dialog Simulation Box */}
@@ -184,7 +180,10 @@ export const SecurityKillSwitchDemo: React.FC = () => {
           </div>
 
           <p className="text-xs text-slate-300">
-            Electron monitors local cursor delta. If physical mouse movement exceeds 15px, remote input is blocked for <strong>2,000ms</strong>.
+            The Rust host samples the real cursor every 100&nbsp;ms. If it has moved more than{' '}
+            <strong>{PHYSICAL_MOVEMENT_THRESHOLD_PX}px</strong> from where injection last put it, a
+            human is at the machine and remote input is suspended for{' '}
+            <strong>{KILL_SWITCH_COOLDOWN_MS.toLocaleString()}ms</strong>.
           </p>
 
           {/* Kill Switch Simulation Trigger */}
@@ -220,7 +219,7 @@ export const SecurityKillSwitchDemo: React.FC = () => {
                 </div>
                 <div className="w-full h-2 bg-[#05060b] rounded-full overflow-hidden border border-rose-500/30">
                   <div
-                    style={{ width: `${(remainingSuspendTimeMs / 2000) * 100}%` }}
+                    style={{ width: `${(remainingSuspendTimeMs / KILL_SWITCH_COOLDOWN_MS) * 100}%` }}
                     className="h-full bg-gradient-to-r from-rose-500 to-amber-500 transition-all duration-75 shadow-[0_0_10px_rgba(244,63,94,0.8)]"
                   />
                 </div>
@@ -229,9 +228,12 @@ export const SecurityKillSwitchDemo: React.FC = () => {
           </div>
 
           <div className="p-3 bg-[#05060b] rounded-xl border border-cyan-500/15 text-[11px] font-mono text-slate-300 space-y-1">
-            <div className="text-cyan-400 font-semibold">// Electron Main Process Guard Logic:</div>
-            <div>if (isHostMovingPhysicalMouse() || Date.now() &lt; suspendUntil) &#123;</div>
-            <div className="pl-4 text-rose-400">return; // Drop remote input packet immediately</div>
+            <div className="text-cyan-400 font-semibold">// src-tauri/src/input.rs — every injection passes this gate:</div>
+            <div>if !control_enabled &#123;</div>
+            <div className="pl-4 text-rose-400">return Err("remote control is not authorized by the host");</div>
+            <div>&#125;</div>
+            <div>if suspended_remaining_ms() &gt; 0 &#123;</div>
+            <div className="pl-4 text-rose-400">return Err("kill switch active");</div>
             <div>&#125;</div>
           </div>
         </div>

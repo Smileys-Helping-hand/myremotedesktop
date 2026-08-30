@@ -192,7 +192,7 @@ export function calculateRemoteCoordinates(
 
 /**
  * Denormalizes (u, v) coordinates back to Host physical or logical pixels.
- * Used on the Host Electron main process when reading packets from WebRTC RTCDataChannel.
+ * Used by the Rust host process when reading packets from the WebRTC RTCDataChannel.
  */
 export function denormalizeHostCoordinates(
   normX: number,

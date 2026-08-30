@@ -1,19 +1,13 @@
 import React from 'react';
-import { motion } from 'motion/react';
 import {
   Lock,
   Unlock,
   Crosshair,
   PenTool,
   Eraser,
-  Palette,
   Clipboard,
   Upload,
   AlertTriangle,
-  Radio,
-  Sparkles,
-  Layers,
-  Terminal,
 } from 'lucide-react';
 
 interface RemoteControlToolbarProps {
@@ -27,7 +21,6 @@ interface RemoteControlToolbarProps {
   onOpenClipboard: () => void;
   onOpenFileTransfer: () => void;
   onTriggerPanic: () => void;
-  isHost?: boolean;
 }
 
 const COLOR_PALETTE = ['#00d2ff', '#10b981', '#f43f5e', '#fbbf24', '#a855f7', '#ffffff'];
@@ -43,7 +36,6 @@ export const RemoteControlToolbar: React.FC<RemoteControlToolbarProps> = ({
   onOpenClipboard,
   onOpenFileTransfer,
   onTriggerPanic,
-  isHost = false,
 }) => {
   return (
     <div className="bg-[#090b14]/90 border border-slate-800/90 hover:border-cyan-500/30 rounded-2xl p-3.5 shadow-xl backdrop-blur-xl flex flex-wrap items-center justify-between gap-3 transition-all">

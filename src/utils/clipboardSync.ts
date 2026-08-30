@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { ClipboardUpdatePayload } from '../types/remoteControl';
+import { tauriReadClipboard, tauriWriteClipboard } from './tauriBridge';
 
 export interface ClipboardSyncOptions {
   enabled?: boolean;
@@ -32,12 +33,13 @@ export function useClipboardSync(options: ClipboardSyncOptions) {
     return `${hash}_${str.length}`;
   };
 
-  // 1. Read local clipboard (via Electron API or browser navigator.clipboard)
+  // 1. Read the local clipboard: through the host process when we have one,
+  //    since a webview read needs focus and permission the app often lacks.
   const readLocalClipboard = useCallback(async (): Promise<string | null> => {
     try {
-      if (typeof window !== 'undefined' && window.electronAPI?.readClipboardText) {
-        return await window.electronAPI.readClipboardText();
-      } else if (typeof navigator !== 'undefined' && navigator.clipboard?.readText) {
+      const native = await tauriReadClipboard();
+      if (native !== null) return native;
+      if (typeof navigator !== 'undefined' && navigator.clipboard?.readText) {
         return await navigator.clipboard.readText();
       }
     } catch (err) {
@@ -47,12 +49,11 @@ export function useClipboardSync(options: ClipboardSyncOptions) {
     return null;
   }, []);
 
-  // 2. Write to local clipboard (via Electron API or browser navigator.clipboard)
+  // 2. Write to the local clipboard, host process first for the same reason.
   const writeLocalClipboard = useCallback(async (text: string): Promise<boolean> => {
     try {
-      if (typeof window !== 'undefined' && window.electronAPI?.writeClipboardText) {
-        return await window.electronAPI.writeClipboardText(text);
-      } else if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      if (await tauriWriteClipboard(text)) return true;
+      if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
         await navigator.clipboard.writeText(text);
         return true;
       }
