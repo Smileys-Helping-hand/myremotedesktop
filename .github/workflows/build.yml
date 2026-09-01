@@ -90,6 +90,13 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
 
+    # Creating the release needs write access to repository contents. This
+    # repository defaults its Actions token to read-only, which fails only at
+    # the very end — after a full build — with "Resource not accessible by
+    # integration". Granted per job, so nothing else inherits write access.
+    permissions:
+      contents: write
+
     steps:
       - uses: actions/checkout@v4
 
