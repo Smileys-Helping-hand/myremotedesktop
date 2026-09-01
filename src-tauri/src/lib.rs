@@ -219,7 +219,7 @@ fn update_capability(app: AppHandle) -> UpdateCapability {
                 current_version,
             };
         }
-        return UpdateCapability {
+        UpdateCapability {
             supported: false,
             install_kind: "system-package".into(),
             reason: Some(
@@ -227,7 +227,7 @@ fn update_capability(app: AppHandle) -> UpdateCapability {
                     .into(),
             ),
             current_version,
-        };
+        }
     }
 
     #[cfg(target_os = "windows")]

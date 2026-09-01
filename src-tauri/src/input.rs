@@ -132,10 +132,12 @@ fn report_backend(name: &str, engine: &mut Enigo) {
 /// connection to be had, which is the case on a bare wlroots session.
 #[cfg(target_os = "linux")]
 fn new_input_engine() -> Result<Enigo, String> {
-    let mut prefer_x11 = Settings::default();
-    // A name no compositor listens on, so the Wayland backend cannot connect
-    // and enigo is left with X11.
-    prefer_x11.wayland_display = Some("remotedesk-prefer-x11".to_string());
+    let prefer_x11 = Settings {
+        // A name no compositor listens on, so the Wayland backend cannot connect
+        // and enigo is left with X11.
+        wayland_display: Some("remotedesk-prefer-x11".to_string()),
+        ..Default::default()
+    };
 
     match Enigo::new(&prefer_x11) {
         Ok(mut engine) => {
