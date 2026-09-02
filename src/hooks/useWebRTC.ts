@@ -452,6 +452,37 @@ export function useWebRTC(options: WebRTCOptions = {}) {
         setSignalingState(pc.signalingState);
       };
 
+      // Renegotiation.
+      //
+      // The Desk ID is live from the moment the host opens the app, so a client
+      // can already be connected when the operator picks a screen to share.
+      // `addTrack` then fires this. Without it the track joins the connection
+      // but is never negotiated, and the client sits on a black frame forever.
+      //
+      // Only the host offers, only once there is a peer to offer to, and only
+      // while the connection is idle — renegotiating mid-handshake would
+      // clobber an in-flight description.
+      pc.onnegotiationneeded = async () => {
+        if (currentRole !== 'host') return;
+        const peerId = remotePeerIdRef.current;
+        if (!peerId || pc.signalingState !== 'stable') return;
+
+        try {
+          const offer = await pc.createOffer();
+          // State can move while createOffer awaits.
+          if (pc.signalingState !== 'stable') return;
+          await pc.setLocalDescription(offer);
+          sendSignalingMessage({
+            type: 'offer',
+            roomId: roomIdRef.current || undefined,
+            targetId: peerId,
+            data: offer,
+          });
+        } catch (err) {
+          console.warn('[WebRTC] renegotiation failed:', err);
+        }
+      };
+
       // ICE Candidates
       pc.onicecandidate = (event) => {
         if (event.candidate) {
@@ -759,7 +790,12 @@ export function useWebRTC(options: WebRTCOptions = {}) {
             remotePeerIdRef.current = res.hostId;
           }
         } else {
-          setJoinError(res.reason || 'Join request rejected');
+          // Name the server that answered. "No host is sharing that Desk ID"
+          // is indistinguishable from a typo until you know *which* machine was
+          // asked — and the commonest cause is asking the wrong one, because
+          // the field still points at this machine's own signaling server.
+          const reason = res.reason || 'Join request rejected';
+          setJoinError(`${reason} (asked ${serverUrl})`);
           setConnectionState('failed');
         }
       });
@@ -824,6 +860,47 @@ export function useWebRTC(options: WebRTCOptions = {}) {
       });
     },
     [createPeerConnection, sendSignalingMessage]
+  );
+
+  /**
+   * Publishes (or updates) this machine's Desk ID on the signaling server.
+   *
+   * Separate from `joinRoom` because it must not disturb an established
+   * session: `joinRoom` rebuilds the peer connection, which would drop a
+   * connected client just because the operator toggled unattended access.
+   *
+   * The host calls this as soon as its view opens, so the Desk ID shown on
+   * screen is one a client can actually connect to. Registering only when
+   * screen sharing began was the reason a client was told "no host is sharing
+   * that Desk ID" while the host had the ID plainly displayed in front of them.
+   *
+   * Reconnects are covered by the socket's `connect` handler, which re-emits
+   * from these same refs.
+   */
+  const registerHost = useCallback(
+    (targetRoomId: string, pin?: string, isUnattended = true) => {
+      roleRef.current = 'host';
+      roomIdRef.current = targetRoomId;
+      unattendedRef.current = isUnattended;
+      pinRef.current = pin?.trim().toUpperCase();
+
+      setRole('host');
+      setRoomId(targetRoomId);
+
+      const socket = socketRef.current;
+      if (socket?.connected) {
+        socket.emit('host:create', {
+          roomId: targetRoomId,
+          unattended: isUnattended,
+          pin: pinRef.current,
+        });
+      } else {
+        // Not connected yet — the `connect` handler re-emits from the refs set
+        // above, so the registration is not lost.
+        socket?.connect();
+      }
+    },
+    []
   );
 
   // Emergency Panic Button
@@ -926,6 +1003,7 @@ export function useWebRTC(options: WebRTCOptions = {}) {
     lastReceivedMousePacket,
     lastReceivedEventPacket,
     joinRoom,
+    registerHost,
     leaveRoom,
     severAllConnections,
     sendMousePacket,

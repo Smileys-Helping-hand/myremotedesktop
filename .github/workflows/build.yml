@@ -75,6 +75,10 @@ jobs:
             sleep 1
           done
           npx tsx scripts/check-signaling.ts http://localhost:4000
+          # A host must be discoverable by Desk ID without having started a
+          # screen share. That was broken once and made every cross-machine
+          # connection fail with "no host is sharing that Desk ID".
+          npx tsx scripts/check-host-discovery.ts http://localhost:4000
           kill $SERVER_PID
 
   build-tauri:

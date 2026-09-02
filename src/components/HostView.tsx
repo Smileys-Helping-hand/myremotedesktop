@@ -188,7 +188,7 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
     isSocketConnected,
     dataChannelsReady,
     stats,
-    joinRoom,
+    registerHost,
     leaveRoom,
     severAllConnections,
     sendEventPacket,
@@ -221,6 +221,20 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
       sendEventPacket(packet);
     },
   });
+
+  // Publish the Desk ID as soon as this view opens.
+  //
+  // The ID is displayed the moment the app starts, so it has to be one a client
+  // can actually connect to. Registering it only when screen sharing began made
+  // the obvious flow — read the ID, type it on the other machine, connect —
+  // fail with "no host is sharing that Desk ID", in both directions.
+  //
+  // Re-runs when access settings change so the server always holds the current
+  // PIN; `registerHost` deliberately leaves an established peer connection
+  // alone, so toggling a setting mid-session does not drop the client.
+  useEffect(() => {
+    registerHost(roomId, unattendedAccess ? undefined : rotatingPin, unattendedAccess);
+  }, [registerHost, roomId, unattendedAccess, rotatingPin]);
 
   // Wire up FileTransferManager callbacks
   useEffect(() => {
@@ -366,7 +380,11 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
       await tauriSetControlEnabled(true);
     }
 
-    await joinRoom(roomId, 'host', unattendedAccess ? undefined : rotatingPin, unattendedAccess);
+    // The room is already published (see the registration effect above), so
+    // this only refreshes the access settings. Calling joinRoom here would
+    // rebuild the peer connection and disconnect a client that had already
+    // joined and was waiting for the operator to pick a screen.
+    registerHost(roomId, unattendedAccess ? undefined : rotatingPin, unattendedAccess);
 
     showToast({
       title: 'Screen Broadcast Active',

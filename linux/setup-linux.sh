@@ -6,9 +6,9 @@
 #
 #   1. Screen capture — provided by xdg-desktop-portal + PipeWire, which the
 #      webview calls through getDisplayMedia().
-#   2. Input injection — XTest on X11, or, on Wayland, either the RemoteDesktop
-#      portal (GNOME, KDE) or the wlroots virtual-input protocols (Sway,
-#      Hyprland). All three backends are compiled in and chosen at runtime.
+#   2. Input injection — X11/XTest wherever an X display exists, including
+#      XWayland on a Wayland desktop, otherwise the wlroots virtual-input
+#      protocols (Sway, Hyprland).
 #
 # Nothing here needs root, and nothing writes to your system: this reports what
 # is present and prints the install command for whatever is missing.
@@ -108,23 +108,63 @@ fi
 
 # --- Input injection ----------------------------------------------------------
 echo -e "\n${CYAN}Input injection${NC}"
-if [ "$IS_WAYLAND" -eq 1 ]; then
-  echo -e "  Wayland session: no XTest, so RemoteDesk uses a Wayland path."
+if [ -n "${DISPLAY:-}" ]; then
+  # XTest is preferred whenever an X display exists, which on a Wayland desktop
+  # means XWayland. It controls X clients; native Wayland clients are outside
+  # its reach, which is why an Xorg session is the reliable choice for hosting.
+  ok "X display present — X11/XTest injection will be used"
+  if [ "$IS_WAYLAND" -eq 1 ]; then
+    warn "this is a Wayland session, so XTest reaches XWayland apps only."
+    warn "log in under Xorg if a remote peer must control everything."
+  fi
+elif [ "$IS_WAYLAND" -eq 1 ]; then
   case "${DESKTOP,,}" in
-    *gnome*|*kde*|*plasma*)
-      ok "GNOME/KDE detected — the RemoteDesktop portal will be used"
-      warn "your desktop will ask you to approve remote control on first use"
-      ;;
     *sway*|*hypr*|*wlroots*|*river*)
-      ok "wlroots compositor detected — virtual-input protocols will be used"
+      ok "wlroots compositor — the virtual-input protocols will be used"
       ;;
     *)
-      warn "unrecognised compositor: RemoteDesk will try the RemoteDesktop portal,"
-      warn "then the wlroots virtual-input protocols. One of them usually works."
+      bad "Wayland with no X display, and this compositor is unlikely to offer"
+      bad "the wlroots virtual-input protocols — remote control will not work."
+      echo -e "      Log in under Xorg to host from this machine."
       ;;
   esac
 else
-  ok "X11 session — XTest injection works with no extra permission"
+  bad "no display server detected — injection cannot work"
+fi
+
+echo -e "  The app states the outcome at startup, e.g."
+echo -e "    ${CYAN}[remotedesk] input backend: X11/XTest — verified, cursor responds${NC}"
+
+# --- Reachability -------------------------------------------------------------
+# Only matters when this machine is the host: the other machine has to be able
+# to open a connection to the signaling port. A firewall blocking it produces no
+# error on either side — the client simply never connects.
+echo -e "\n${CYAN}Inbound connections (needed to host)${NC}"
+PORT_RANGE="4000:4009"
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+  if ufw status 2>/dev/null | grep -qE "4000"; then
+    ok "ufw is active and already allows the signaling ports"
+  else
+    bad "ufw is active and does not allow the signaling ports"
+    echo -e "      other machines cannot reach this host until you run:"
+    echo -e "      ${CYAN}sudo ufw allow ${PORT_RANGE}/tcp${NC}"
+  fi
+elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+  if firewall-cmd --list-ports 2>/dev/null | grep -q "4000"; then
+    ok "firewalld is active and already allows the signaling ports"
+  else
+    bad "firewalld is active and does not allow the signaling ports"
+    echo -e "      other machines cannot reach this host until you run:"
+    echo -e "      ${CYAN}sudo firewall-cmd --add-port=4000-4009/tcp --permanent && sudo firewall-cmd --reload${NC}"
+  fi
+else
+  ok "no active host firewall detected — inbound connections should arrive"
+fi
+
+LAN_IP=$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+if [ -n "$LAN_IP" ]; then
+  echo -e "  This machine is reachable at ${GREEN}http://${LAN_IP}:4000${NC}"
+  echo -e "  That is the address to type on the other machine."
 fi
 
 # --- Webview ------------------------------------------------------------------
