@@ -23,3 +23,6 @@ installers/
 # lives in ~/.remotedesk-keys and in the TAURI_SIGNING_PRIVATE_KEY CI secret.
 *.key
 !**/*.key.pub
+
+# Scratch space for verifying published release artifacts
+.verify/

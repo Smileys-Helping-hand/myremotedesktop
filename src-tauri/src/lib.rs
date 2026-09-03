@@ -223,7 +223,7 @@ fn update_capability(app: AppHandle) -> UpdateCapability {
             supported: false,
             install_kind: "system-package".into(),
             reason: Some(
-                "RemoteDesk was installed from a .deb or .rpm, which your package manager owns.                  Update it with `sudo apt install --only-upgrade remotedesk` or                  `sudo dnf upgrade remotedesk`, or switch to the AppImage, which updates itself."
+                "RemoteDesk was installed from a .deb or .rpm, which your package manager owns.                  Update it with `sudo apt install --only-upgrade remote-desk` or                  `sudo dnf upgrade remote-desk`, or switch to the AppImage, which updates itself."
                     .into(),
             ),
             current_version,
@@ -248,6 +248,40 @@ fn update_capability(app: AppHandle) -> UpdateCapability {
             reason: None,
             current_version,
         }
+    }
+}
+
+/// Whether other machines can actually reach this host.
+///
+/// Windows blocks inbound connections to a new program by default. The
+/// installer adds a rule, but that step can fail without saying so — and when
+/// it does, the host looks healthy while every client sees it as unreachable.
+/// Reporting it in the host UI turns a silent, expensive failure into a single
+/// command the operator can copy.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FirewallStatus {
+    /// False where the platform does not gate inbound connections this way.
+    pub applicable: bool,
+    /// Whether the rule was found. Meaningless when `applicable` is false.
+    pub rule_present: bool,
+    /// The command that adds it, for the operator to run as administrator.
+    pub fix_command: String,
+}
+
+#[tauri::command]
+fn firewall_status() -> FirewallStatus {
+    match platform::firewall_rule_present() {
+        Some(present) => FirewallStatus {
+            applicable: true,
+            rule_present: present,
+            fix_command: platform::firewall_fix_command().to_string(),
+        },
+        None => FirewallStatus {
+            applicable: false,
+            rule_present: true,
+            fix_command: String::new(),
+        },
     }
 }
 
@@ -664,6 +698,7 @@ pub fn run() {
             inject_key,
             panic_revoke,
             system_diagnostics,
+            firewall_status,
             update_capability,
             get_signal_url,
             get_network_info,

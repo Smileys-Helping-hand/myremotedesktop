@@ -42,7 +42,7 @@ verify is refused, so a compromised download host cannot push a modified build.
 |---|---|
 | Windows `.exe` | Yes |
 | Linux `.AppImage` | Yes |
-| Linux `.deb` / `.rpm` | No — your package manager owns those files. Use `sudo apt install --only-upgrade remotedesk` or `sudo dnf upgrade remotedesk`, or switch to the AppImage. |
+| Linux `.deb` / `.rpm` | No — your package manager owns those files. Use `sudo apt install --only-upgrade remote-desk` or `sudo dnf upgrade remote-desk`, or switch to the AppImage. |
 
 The app knows which of these it is and says so rather than offering a button that cannot work.
 

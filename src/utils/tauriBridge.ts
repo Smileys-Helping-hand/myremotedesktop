@@ -293,3 +293,33 @@ export async function tauriSaveFile(fileName: string, bytes: ArrayBuffer): Promi
     return false;
   }
 }
+
+export interface FirewallStatus {
+  /** False where the platform does not gate inbound connections this way. */
+  applicable: boolean;
+  /** Whether the inbound rule was found. Meaningless when not applicable. */
+  rulePresent: boolean;
+  /** Command the operator can run as administrator to add it. */
+  fixCommand: string;
+}
+
+/**
+ * Whether other machines can actually reach this host.
+ *
+ * Windows blocks inbound connections to a new program by default. The installer
+ * adds a rule, but that can fail silently — when it does, the host looks
+ * perfectly healthy while every client reports it as unreachable, and nothing
+ * on either side explains why.
+ *
+ * Returns `null` outside Tauri, and `applicable: false` on platforms that do
+ * not need the rule, so the caller can stay quiet rather than warn wrongly.
+ */
+export async function tauriFirewallStatus(): Promise<FirewallStatus | null> {
+  if (!isTauri()) return null;
+  try {
+    return await invoke<FirewallStatus>('firewall_status');
+  } catch (err) {
+    console.warn('[Tauri] firewall_status error:', err);
+    return null;
+  }
+}

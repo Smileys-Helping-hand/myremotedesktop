@@ -148,3 +148,61 @@ pub fn log_startup_diagnostics() {
         println!("[remotedesk] note: {note}");
     }
 }
+
+/// Whether the inbound firewall rule the host needs is actually in place.
+///
+/// The NSIS installer adds it, but that can fail silently — it did on at least
+/// one machine, leaving no rule of any kind. Windows Firewall then blocks
+/// inbound connections to the app by default, so every other machine sees the
+/// host as unreachable while the host itself looks perfectly healthy. Neither
+/// side reports anything useful, which makes it an expensive failure to
+/// diagnose by hand.
+///
+/// Checked at runtime rather than trusted at install time, so it is caught
+/// however the app arrived — installer, portable copy, or a rule someone
+/// removed later.
+///
+/// Uses `netsh` rather than the `Get-NetFirewallRule` PowerShell provider on
+/// purpose. On at least one machine that provider returns nothing at all for a
+/// rule `netsh` lists in full, with the firewall service running and the rule
+/// enabled. Trusting it would tell users on such a machine that their working
+/// host is unreachable, which is worse than not checking at all.
+#[cfg(target_os = "windows")]
+pub fn firewall_rule_present() -> Option<bool> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    /// Keeps `netsh` from flashing a console window over the app.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let output = Command::new("netsh")
+        .args([
+            "advfirewall",
+            "firewall",
+            "show",
+            "rule",
+            "name=RemoteDesk Signaling",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+
+    // netsh exits non-zero and prints "No rules match the specified criteria"
+    // when the rule is absent, so the exit status alone is the answer.
+    Some(output.status.success())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn firewall_rule_present() -> Option<bool> {
+    // Only Windows blocks inbound connections to a new program by default.
+    None
+}
+
+/// The command an operator can run to allow inbound connections.
+///
+/// Kept beside the check so the advice cannot drift from the rule name and port
+/// range the check looks for, or from the installer hook that adds it.
+pub fn firewall_fix_command() -> &'static str {
+    "netsh advfirewall firewall add rule name=\"RemoteDesk Signaling\" dir=in \
+     action=allow protocol=TCP localport=4000-4009 profile=private,domain"
+}

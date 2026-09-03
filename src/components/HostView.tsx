@@ -37,6 +37,7 @@ import {
   tauriInjectMouseWheel,
   tauriInjectKey,
   tauriPanicRevoke,
+  tauriFirewallStatus,
 } from '../utils/tauriBridge';
 import { canControlHost, isBrowserHostSession } from '../utils/hostControl';
 import { FileTransferModal } from './FileTransferModal';
@@ -81,6 +82,7 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
   // Unattended Access (AnyDesk style - no need to walk to host server!)
   const [unattendedAccess, setUnattendedAccess] = useState<boolean>(true);
   const [lanEndpoints, setLanEndpoints] = useState<string[]>([]);
+  const [firewallBlocked, setFirewallBlocked] = useState<{ fixCommand: string } | null>(null);
   // Hosting always uses this machine's own signaling server.
   const [serverUrl] = useState<string>(() => getHostSignalUrl());
 
@@ -221,6 +223,25 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
       sendEventPacket(packet);
     },
   });
+
+  // Warn if inbound connections are blocked.
+  //
+  // Windows refuses inbound connections to a new program by default. The
+  // installer adds a rule, but that can fail without reporting anything — and
+  // when it does the host looks healthy here while every client reports it as
+  // unreachable. Checking at runtime catches it however the app was installed.
+  useEffect(() => {
+    let cancelled = false;
+    tauriFirewallStatus().then((status) => {
+      if (cancelled || !status) return;
+      setFirewallBlocked(
+        status.applicable && !status.rulePresent ? { fixCommand: status.fixCommand } : null
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Publish the Desk ID as soon as this view opens.
   //
@@ -625,6 +646,28 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
             )}
           </div>
         </div>
+
+        {/* Inbound connections blocked — nothing else on the network can reach us */}
+        {firewallBlocked && (
+          <div className="mt-4 rounded-xl border border-amber-500/40 bg-amber-950/25 px-4 py-3 space-y-2">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+              <div className="text-xs text-amber-100 leading-relaxed">
+                <span className="font-bold">Other machines cannot reach this host.</span> Windows
+                Firewall has no inbound rule for RemoteDesk, so clients will report the Desk ID as
+                not found even though it is live. Run this once in an Administrator terminal:
+              </div>
+            </div>
+            <button
+              onClick={() => handleCopyWebUrl(firewallBlocked.fixCommand)}
+              className="w-full text-left px-3 py-2 rounded-lg bg-[#07080f] border border-amber-500/30 text-amber-200 text-[11px] font-mono break-all hover:bg-amber-950/40 transition-colors flex items-start gap-2"
+              title="Click to copy"
+            >
+              <Copy className="w-3 h-3 text-amber-400 shrink-0 mt-0.5" />
+              <span>{firewallBlocked.fixCommand}</span>
+            </button>
+          </div>
+        )}
 
         {/* LAN Access helper banner */}
         {lanEndpoints.length > 0 && (
