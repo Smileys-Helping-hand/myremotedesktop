@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { AlertCircle, ArrowUpCircle, CheckCircle2, Download, Loader2, X } from 'lucide-react';
 import {
   checkForUpdate,
+  compareVersions,
   formatProgress,
   getUpdateCapability,
   installUpdate,
@@ -43,6 +44,18 @@ export const UpdateBanner: React.FC = () => {
       try {
         const found = await checkForUpdate();
         if (cancelled || !found) return;
+
+        // The updater plugin already refuses to offer a downgrade, but this
+        // banner is the last line of defense before an operator sees "Update
+        // Available" — cheap to re-check, and it means a manifest mistake (an
+        // older or identical version accidentally published as latest) fails
+        // silently here instead of prompting an unnecessary reinstall.
+        if (compareVersions(found.version, found.currentVersion) <= 0) {
+          console.warn(
+            `[updater] ignoring a non-newer version offered by the release endpoint: ${found.version} vs current ${found.currentVersion}`
+          );
+          return;
+        }
 
         // Respect a dismissal, but only for the version that was dismissed —
         // a newer release should surface again.

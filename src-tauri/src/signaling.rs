@@ -323,12 +323,29 @@ async fn network_info(State(handle): State<SignalingHandle>) -> impl IntoRespons
 }
 
 /// Starts (or reports the already-running) public tunnel to this host.
-async fn start_tunnel(State(handle): State<SignalingHandle>) -> impl IntoResponse {
+async fn start_tunnel(
+    State(handle): State<SignalingHandle>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+
+    // Publishing this host to the public internet is the operator's call, made
+    // by clicking Generate Public URL in the app they are sitting at. The
+    // server binds 0.0.0.0 for signaling, so without this check any other
+    // machine on the LAN — not just a peer already in a session — could POST
+    // here and force the host onto a public Cloudflare URL with no consent and
+    // no visible prompt.
+    if !peer.ip().is_loopback() {
+        eprintln!("[remotedesk] refused a tunnel start request from {peer} (not loopback)");
+        return (StatusCode::FORBIDDEN, "starting a public tunnel is available on loopback only")
+            .into_response();
+    }
+
     let port = handle.port().unwrap_or(DEFAULT_PORT);
     let mut state = handle.tunnel.lock().await;
 
     if let Some(url) = &state.url {
-        return Json(json!({ "ok": true, "tunnelUrl": url }));
+        return Json(json!({ "ok": true, "tunnelUrl": url })).into_response();
     }
 
     let (result, child) = tunnel::start(port).await;
@@ -337,10 +354,10 @@ async fn start_tunnel(State(handle): State<SignalingHandle>) -> impl IntoRespons
             state.url = Some(url.clone());
             state.child = child;
             println!("[remotedesk] public tunnel: {url}");
-            Json(json!({ "ok": true, "tunnelUrl": url }))
+            Json(json!({ "ok": true, "tunnelUrl": url })).into_response()
         }
         TunnelStart::Unavailable(reason) | TunnelStart::Failed(reason) => {
-            Json(json!({ "ok": false, "tunnelUrl": Value::Null, "reason": reason }))
+            Json(json!({ "ok": false, "tunnelUrl": Value::Null, "reason": reason })).into_response()
         }
     }
 }
@@ -491,8 +508,15 @@ async fn download_installer(
         return (StatusCode::BAD_REQUEST, "invalid file name").into_response();
     }
 
-    match std::fs::read(&full) {
-        Ok(bytes) => (
+    // Installers run up to ~80MB. Reading that synchronously on this async
+    // handler's own task would block whichever tokio worker thread drew it for
+    // as long as the read takes — stalling any signaling or control-channel
+    // work that lands on the same thread mid-download. spawn_blocking moves it
+    // onto the blocking pool instead.
+    let read_result = tokio::task::spawn_blocking(move || std::fs::read(&full)).await;
+
+    match read_result {
+        Ok(Ok(bytes)) => (
             StatusCode::OK,
             [
                 (header::CONTENT_TYPE, "application/octet-stream".to_string()),
@@ -504,7 +528,8 @@ async fn download_installer(
             bytes,
         )
             .into_response(),
-        Err(_) => (StatusCode::NOT_FOUND, "no such installer").into_response(),
+        Ok(Err(_)) => (StatusCode::NOT_FOUND, "no such installer").into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "download task panicked").into_response(),
     }
 }
 
@@ -819,6 +844,22 @@ fn host_create(handle: &SignalingHandle, peer_id: &str, data: &Value) {
     );
 }
 
+/// Whether a room's PIN (if it has one) admits a client presenting `provided`.
+///
+/// A room with no PIN admits everyone — that is what unattended access or an
+/// empty pin field means. Otherwise the comparison is constant-time: this is
+/// the authoritative check (the same rule the control token uses), and a PIN
+/// is exactly the kind of short, guessable secret a timing side-channel is
+/// worth denying an attacker, even though exploiting one over a network is a
+/// stretch.
+fn pin_grants_entry(room_pin: Option<&str>, provided: Option<&str>) -> bool {
+    match (room_pin, provided) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(expected), Some(provided)) => token_matches(expected, provided),
+    }
+}
+
 fn client_join(handle: &SignalingHandle, peer_id: &str, data: &Value) -> Verdict {
     let room_id = room_id_of(data);
     let pin = normalize_pin(str_field(data, "pin"));
@@ -844,10 +885,7 @@ fn client_join(handle: &SignalingHandle, peer_id: &str, data: &Value) -> Verdict
 
     let unattended = room.unattended;
     let host = room.host.clone();
-    let pin_matches = match &room.pin {
-        None => true,
-        Some(expected) => pin.as_deref() == Some(expected.as_str()),
-    };
+    let pin_matches = pin_grants_entry(room.pin.as_deref(), pin.as_deref());
 
     if unattended || pin_matches {
         hub.failed_joins.remove(peer_id);
@@ -1261,6 +1299,23 @@ mod tests {
         assert_eq!(room_id_of(&json!("  784920 ")), "784920");
         assert_eq!(room_id_of(&json!({ "roomId": "desk-1" })), "desk-1");
         assert_eq!(room_id_of(&json!({})), "");
+    }
+
+    #[test]
+    fn a_room_with_no_pin_admits_anyone() {
+        assert!(pin_grants_entry(None, None));
+        assert!(pin_grants_entry(None, Some("AB12")));
+        assert!(pin_grants_entry(None, Some("")));
+    }
+
+    #[test]
+    fn a_pin_protected_room_requires_an_exact_match() {
+        assert!(pin_grants_entry(Some("AB12"), Some("AB12")));
+        assert!(!pin_grants_entry(Some("AB12"), Some("ZZ99")));
+        assert!(!pin_grants_entry(Some("AB12"), None));
+        // Case and whitespace are normalize_pin's job, applied before this
+        // point — this function itself must not paper over a mismatch.
+        assert!(!pin_grants_entry(Some("AB12"), Some("ab12")));
     }
 
     #[test]

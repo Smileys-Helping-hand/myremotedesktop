@@ -15,6 +15,7 @@
  * server implementations in step.
  */
 import { createServer } from 'node:http';
+import { timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -106,6 +107,30 @@ function normalizePin(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim().toUpperCase();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * Whether a room's PIN (if it has one) admits a client presenting `provided`.
+ *
+ * A room with no PIN admits everyone — that is what unattended access or an
+ * empty pin field means. Otherwise the comparison is constant-time via
+ * timingSafeEqual: this is the authoritative check, and a PIN is exactly the
+ * kind of short, guessable secret a timing side-channel is worth denying —
+ * this server, unlike the desktop app's embedded one, is meant to be reachable
+ * as a shared relay, which widens who could ever attempt such a thing.
+ *
+ * Mirrors pin_grants_entry in src-tauri/src/signaling.rs; keep the two in step.
+ */
+function pinGrantsEntry(roomPin: string | undefined, provided: string | undefined): boolean {
+  if (!roomPin) return true;
+  if (!provided) return false;
+  const expected = Buffer.from(roomPin, 'utf8');
+  const actual = Buffer.from(provided, 'utf8');
+  // timingSafeEqual throws on a length mismatch rather than returning false;
+  // the length itself is not a secret (PINs are a fixed, known length), so
+  // this early return leaks nothing an attacker did not already know.
+  if (expected.length !== actual.length) return false;
+  return timingSafeEqual(expected, actual);
 }
 
 /** Accepts both the object form and the bare-string form of a room payload. */
@@ -224,7 +249,7 @@ function clientJoin(peerId: string, data: any) {
     return;
   }
 
-  const pinMatches = !room.pin || room.pin === pin;
+  const pinMatches = pinGrantsEntry(room.pin, pin);
   if (room.unattended || pinMatches) {
     failedJoins.delete(peerId);
     room.clientIds.add(peerId);

@@ -771,14 +771,27 @@ export function useWebRTC(options: WebRTCOptions = {}) {
       socket.on('peer:left', (data) => handleSignaling('peer:left', data));
       socket.on('session:ended', (data) => handleSignaling('session:ended', data));
 
-      // Host receives join request
-      socket.on('peer:join-request', ({ requestId, pin }: { requestId: string; peerId: string; pin: string }) => {
-        // Auto-approve if unattended mode is on or PIN matches
-        const isAuthorized = unattendedRef.current || !pinRef.current || pinRef.current === pin?.trim().toUpperCase();
+      // Host receives a join request.
+      //
+      // The server only ever sends this after deciding, itself, that the pin
+      // the joining client typed did not match — unattended mode or a matching
+      // pin are both granted directly by the server without reaching here. So
+      // by the time this fires, "did the pin match" has already been answered
+      // authoritatively, by the one process holding the real value.
+      //
+      // This used to re-derive its own verdict from pinRef.current, the host
+      // browser's own cached copy of the pin it last registered. That is
+      // redundant at best, since it can only ever repeat the server's already-
+      // final decision — and at worst wrong, if the 60-second rotation lands
+      // between the server's check and this event arriving, comparing against
+      // a pin that has since moved on. There is no human-approval UI behind
+      // this event today, so the only honest response is to deny: the server
+      // already told us why.
+      socket.on('peer:join-request', ({ requestId }: { requestId: string; peerId: string; pin: string }) => {
         socket?.emit('host:auth-result', {
           requestId,
-          granted: isAuthorized,
-          reason: isAuthorized ? undefined : 'Invalid PIN',
+          granted: false,
+          reason: 'PIN did not match',
         });
       });
 

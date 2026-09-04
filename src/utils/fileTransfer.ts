@@ -209,6 +209,19 @@ export class FileTransferManager {
   public handleIncomingPacket(packet: RemoteControlPacket): boolean {
     if (packet.type === 'FILE_TRANSFER_START') {
       const p = packet as FileTransferStartPayload;
+
+      // The remote peer announces totalChunks itself, and every later chunk's
+      // index is trusted against it below. A peer that got this far is already
+      // authorized (past the PIN / host-approval gate), but bounding it here
+      // still keeps a misbehaving or buggy peer from growing a JS array on a
+      // wildly out-of-range index — sparse-array dictionary-mode blowup rather
+      // than a crash, but still worth refusing outright.
+      const MAX_CHUNKS = 2_000_000; // ~64GB at the 32KB chunk size this app uses
+      if (!Number.isInteger(p.totalChunks) || p.totalChunks <= 0 || p.totalChunks > MAX_CHUNKS) {
+        console.warn(`[FileTransfer] refusing transfer with implausible totalChunks: ${p.totalChunks}`);
+        return false;
+      }
+
       const transfer: ActiveFileTransfer = {
         transferId: p.transferId,
         fileName: p.fileName,
@@ -232,6 +245,20 @@ export class FileTransferManager {
       const p = packet as FileTransferChunkPayload;
       const transfer = this.activeTransfers.get(p.transferId);
       if (transfer && transfer.receivedChunks) {
+        // Reject an index outside what START announced, rather than trusting
+        // it to index a JS array — an out-of-range index would otherwise be
+        // silently accepted and grow the array arbitrarily.
+        if (
+          !Number.isInteger(p.chunkIndex) ||
+          p.chunkIndex < 0 ||
+          p.chunkIndex >= transfer.totalChunks
+        ) {
+          console.warn(
+            `[FileTransfer] dropping chunk with out-of-range index ${p.chunkIndex} (expected 0..${transfer.totalChunks})`
+          );
+          return true;
+        }
+
         const buffer = this.base64ToArrayBuffer(p.data);
         transfer.receivedChunks[p.chunkIndex] = buffer;
         transfer.chunksProcessed += 1;
@@ -250,6 +277,19 @@ export class FileTransferManager {
       const p = packet as FileTransferCompletePayload;
       const transfer = this.activeTransfers.get(p.transferId);
       if (transfer && transfer.receivedChunks) {
+        // A hole in receivedChunks (a chunk that never arrived) would not
+        // throw here — the Blob constructor stringifies a missing element to
+        // the literal text "undefined" and silently splices it into the file.
+        // Refusing to assemble is safer than handing back a corrupted download
+        // that looks like it worked.
+        if (transfer.chunksProcessed !== transfer.totalChunks) {
+          transfer.status = 'error';
+          transfer.error = `Incomplete transfer: received ${transfer.chunksProcessed} of ${transfer.totalChunks} chunks`;
+          delete transfer.receivedChunks;
+          this.notify();
+          return true;
+        }
+
         // Assemble Blob from received chunks
         const blob = new Blob(transfer.receivedChunks, { type: transfer.mimeType });
         const downloadUrl = URL.createObjectURL(blob);

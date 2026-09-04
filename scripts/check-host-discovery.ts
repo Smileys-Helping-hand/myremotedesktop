@@ -36,7 +36,10 @@ class Peer {
   private received: Frame[] = [];
   private waiters: Array<{ event: string; resolve: (f: Frame) => void }> = [];
 
-  private constructor(socket: WebSocket) {
+  // Public so `connect` can attach the frame listener before the socket has
+  // even finished opening — see the comment there for why that ordering
+  // matters, rather than the usual pattern of listening only after `open`.
+  constructor(socket: WebSocket) {
     this.socket = socket;
     socket.on('message', (raw) => {
       let frame: Frame;
@@ -56,12 +59,22 @@ class Peer {
 
   static async connect(label: string): Promise<Peer> {
     const socket = new WebSocket(WS_URL);
+
+    // The server sends "welcome" as soon as it accepts the connection, which
+    // can arrive in the same TCP segment as the handshake response — the ws
+    // library can then emit 'open' immediately followed by 'message' within
+    // the same synchronous parse pass, before an `await` here ever yields
+    // back to attach a listener. Constructing the Peer (which registers the
+    // message handler) before awaiting 'open' means nothing can be emitted
+    // before something is listening for it.
+    const peer = new Peer(socket);
+
     await new Promise<void>((resolve, reject) => {
       socket.once('open', () => resolve());
       socket.once('error', (err) => reject(new Error(`${label}: ${err.message}`)));
       setTimeout(() => reject(new Error(`${label}: timed out connecting to ${WS_URL}`)), 8000);
     });
-    return new Peer(socket);
+    return peer;
   }
 
   send(event: string, data: unknown) {
