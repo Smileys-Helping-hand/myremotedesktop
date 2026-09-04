@@ -12,11 +12,20 @@ beforeAll(() => {
   if (typeof URL.createObjectURL !== 'function') {
     URL.createObjectURL = () => 'blob:mock-url';
   }
-  // jsdom's Blob polyfill omits arrayBuffer(); Response's does not, in both
-  // jsdom and real browsers, so it stands in here.
+  // jsdom's Blob polyfill omits arrayBuffer(). FileReader is jsdom's own
+  // long-stable implementation, not Node's fetch/undici stack — a first
+  // attempt here went through `new Response(blob).arrayBuffer()`, which
+  // worked locally on Node 24 but threw "object.stream is not a function" in
+  // CI on Node 20, because that path depends on undici internals that differ
+  // between Node versions. FileReader carries no such dependency.
   if (typeof Blob.prototype.arrayBuffer !== 'function') {
     Blob.prototype.arrayBuffer = function (this: Blob) {
-      return new Response(this).arrayBuffer();
+      return new Promise<ArrayBuffer>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as ArrayBuffer);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsArrayBuffer(this);
+      });
     };
   }
 });
