@@ -377,15 +377,41 @@ app.get('/healthz', (_req, res) => {
   });
 });
 
+/**
+ * Desks this server is sharing, for a client scanning the network.
+ *
+ * Mirrors discoverable_hosts in src-tauri/src/signaling.rs; keep the two in
+ * step. The rule that matters: an unattended room with no PIN admits whoever
+ * knows its Desk ID, so publishing that ID on the network would hand the host
+ * to every device on the LAN. Such a room is announced without its ID.
+ */
+function discoverableHosts() {
+  return Array.from(rooms.values())
+    .map((room) => ({
+      deskId: !room.unattended || room.pin ? room.roomId : null,
+      requiresPin: Boolean(room.pin),
+      unattended: room.unattended,
+      clients: room.clientIds.size,
+    }))
+    .sort((a, b) => (a.deskId ?? '').localeCompare(b.deskId ?? ''));
+}
+
 app.get('/network-info', (_req, res) => {
   res.json({
     port: PORT,
     lanAddresses: getLocalIpAddresses().map((ip) => `http://${ip}:${PORT}`),
     tunnelUrl: null,
     rooms: rooms.size,
-    activeRooms: Array.from(rooms.keys()),
+    // Only rooms that still gate entry, for the reason given above.
+    activeRooms: discoverableHosts()
+      .map((h) => h.deskId)
+      .filter((id): id is string => id !== null),
     connections: peers.size,
   });
+});
+
+app.get('/hosts', (_req, res) => {
+  res.json({ hosts: discoverableHosts() });
 });
 
 /** Extensions this server will offer. Anything else in the directory is ignored. */

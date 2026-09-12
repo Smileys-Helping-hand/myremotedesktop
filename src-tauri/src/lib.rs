@@ -4,6 +4,7 @@
 //! enumerating physical displays, injecting mouse/keyboard input, and the
 //! safety interlocks around that injection.
 
+mod discovery;
 mod input;
 mod keymap;
 mod platform;

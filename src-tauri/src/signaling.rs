@@ -188,6 +188,25 @@ pub struct NetworkInfo {
     pub connections: usize,
 }
 
+/// One desk this server is sharing, as answered to a LAN discovery probe.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredHost {
+    /// The Desk ID, or `None` when publishing it would itself grant entry.
+    ///
+    /// An unattended room with no PIN admits whoever knows its ID, so putting
+    /// that ID on the network would hand control of the machine to every device
+    /// on the LAN. Such a room is still announced — a client can see a desk is
+    /// there — but the operator has to read the ID off the host's screen.
+    pub desk_id: Option<String>,
+    /// Whether a PIN is required to join.
+    pub requires_pin: bool,
+    /// Whether the host admits clients without prompting its operator.
+    pub unattended: bool,
+    /// Clients already in the session.
+    pub clients: usize,
+}
+
 impl SignalingHandle {
     fn new() -> Self {
         Self {
@@ -241,6 +260,35 @@ impl SignalingHandle {
     /// URL without the secret, for logging and for display to the operator.
     pub fn local_url_public(&self) -> Option<String> {
         self.port().map(|p| format!("http://127.0.0.1:{p}/"))
+    }
+
+    /// Desks this server is sharing, for a client scanning the network.
+    ///
+    /// Discovery is what makes a LAN host reachable without the operator
+    /// reading an IP address to someone over the phone, so this answers any
+    /// caller. What it will not do is publish a credential: see `desk_id`.
+    pub fn discoverable_hosts(&self) -> Vec<DiscoveredHost> {
+        let hub = match self.hub.lock() {
+            Ok(hub) => hub,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mut hosts: Vec<DiscoveredHost> = hub
+            .rooms
+            .values()
+            .map(|room| {
+                let gated = !room.unattended || room.pin.is_some();
+                DiscoveredHost {
+                    desk_id: gated.then(|| room.room_id.clone()),
+                    requires_pin: room.pin.is_some(),
+                    unattended: room.unattended,
+                    clients: room.clients.len(),
+                }
+            })
+            .collect();
+        // A HashMap yields rooms in arbitrary order; a scanning client shows
+        // this list to a person, so keep it stable between probes.
+        hosts.sort_by(|a, b| a.desk_id.cmp(&b.desk_id));
+        hosts
     }
 
     pub fn network_info(&self) -> NetworkInfo {
@@ -320,6 +368,36 @@ async fn healthz(State(handle): State<SignalingHandle>) -> impl IntoResponse {
 
 async fn network_info(State(handle): State<SignalingHandle>) -> impl IntoResponse {
     Json(handle.network_info())
+}
+
+/// Answers a LAN discovery probe with the desks this machine is sharing.
+async fn hosts(State(handle): State<SignalingHandle>) -> impl IntoResponse {
+    Json(json!({ "hosts": handle.discoverable_hosts() }))
+}
+
+/// Sweeps the local networks for other RemoteDesk hosts, for the local UI.
+///
+/// Loopback only, for the same reason the tunnel endpoint is: this makes this
+/// machine emit hundreds of connection attempts, and that is the operator's
+/// call, made in the app they are sitting at — not something any device on the
+/// network can trigger. The page in a browser handed the session by the Linux
+/// build is loopback too, so it keeps working.
+async fn discover(
+    State(handle): State<SignalingHandle>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+
+    if !peer.ip().is_loopback() {
+        return (
+            StatusCode::FORBIDDEN,
+            "scanning the network is available on loopback only",
+        )
+            .into_response();
+    }
+
+    let port = handle.port().unwrap_or(DEFAULT_PORT);
+    Json(crate::discovery::scan(port, lan_ipv4_addresses()).await).into_response()
 }
 
 /// Starts (or reports the already-running) public tunnel to this host.
@@ -1081,6 +1159,8 @@ fn router(handle: SignalingHandle) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/network-info", get(network_info))
+        .route("/hosts", get(hosts))
+        .route("/discover", get(discover))
         .route("/api/tunnel/start", post(start_tunnel))
         .route("/api/downloads", get(downloads))
         .route("/download/{file}", get(download_installer))
@@ -1177,6 +1257,59 @@ mod tests {
             },
         );
         (hub, host, client)
+    }
+
+    /// Builds a handle whose hub holds exactly the rooms described.
+    fn handle_hosting(rooms: &[(&str, bool, Option<&str>)]) -> SignalingHandle {
+        let handle = SignalingHandle::new();
+        {
+            let mut hub = handle.hub.lock().unwrap();
+            for (room_id, unattended, pin) in rooms {
+                hub.rooms.insert(
+                    (*room_id).into(),
+                    Room {
+                        room_id: (*room_id).into(),
+                        host: format!("host-{room_id}"),
+                        clients: HashSet::new(),
+                        unattended: *unattended,
+                        pin: pin.map(|p| p.to_string()),
+                    },
+                );
+            }
+        }
+        handle
+    }
+
+    #[test]
+    fn discovery_publishes_the_desk_id_of_a_room_that_still_gates_entry() {
+        // Attended: the operator is asked before anyone gets in.
+        let attended = handle_hosting(&[("111111", false, None)]);
+        let hosts = attended.discoverable_hosts();
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].desk_id.as_deref(), Some("111111"));
+
+        // Unattended but PIN protected: the ID alone is not enough.
+        let pinned = handle_hosting(&[("222222", true, Some("AB12"))]);
+        let hosts = pinned.discoverable_hosts();
+        assert_eq!(hosts[0].desk_id.as_deref(), Some("222222"));
+        assert!(hosts[0].requires_pin);
+    }
+
+    #[test]
+    fn discovery_announces_an_open_unattended_room_without_its_desk_id() {
+        let open = handle_hosting(&[("333333", true, None)]);
+        let hosts = open.discoverable_hosts();
+        // The desk is announced — a scanning client can see something is being
+        // shared here — but its ID would admit the whole LAN, so it is withheld.
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].desk_id, None);
+        assert!(hosts[0].unattended);
+        assert!(!hosts[0].requires_pin);
+    }
+
+    #[test]
+    fn discovery_reports_nothing_when_no_desk_is_shared() {
+        assert!(handle_hosting(&[]).discoverable_hosts().is_empty());
     }
 
     #[test]

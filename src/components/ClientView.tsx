@@ -21,7 +21,7 @@ import {
   Search,
   Loader2,
 } from 'lucide-react';
-import { useWebRTC, getDefaultSignalUrl } from '../hooks/useWebRTC';
+import { useWebRTC, getDefaultSignalUrl, getHostSignalUrl } from '../hooks/useWebRTC';
 import { calculateRemoteCoordinates, BoundingBox } from '../utils/coordinateMath';
 import {
   HostScreenMetadata,
@@ -42,6 +42,12 @@ import { StreamControls } from './StreamControls';
 import { AnnotationCanvas, AnnotationMode } from './AnnotationCanvas';
 import { TelemetryStatsPanel } from './TelemetryStatsPanel';
 import { useToast } from './ToastSystem';
+import {
+  scanForHosts,
+  isSharing,
+  autofillDeskId,
+  DiscoveredHost,
+} from '../utils/hostDiscovery';
 
 interface ClientViewProps {
   initialRoomId?: string;
@@ -95,6 +101,9 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
   const videoElementRef = useRef<HTMLVideoElement | null>(null);
 
   const [isScanningLan, setIsScanningLan] = useState<boolean>(false);
+  const [scanProgress, setScanProgress] = useState<{ done: number; total: number } | null>(null);
+  const [discoveredHosts, setDiscoveredHosts] = useState<DiscoveredHost[]>([]);
+  const [scanSummary, setScanSummary] = useState<string | null>(null);
 
   // Update room ID if initialRoomId prop changes or from URL hash
   useEffect(() => {
@@ -106,59 +115,83 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
     }
   }, [initialPin, initialRoomId]);
 
-  // Auto-scan local network for RemoteDesk host instances
+  /** Points the client at a discovered host, filling in whatever it published. */
+  const applyDiscoveredHost = (host: DiscoveredHost) => {
+    setServerUrlInput(host.origin);
+    localStorage.setItem('remotedesk_signal_url', host.origin);
+
+    const deskId = autofillDeskId(host);
+    if (deskId) setRoomIdInput(deskId);
+
+    showToast({
+      title: 'Host Found',
+      description: deskId
+        ? `${host.origin} — Desk ID ${deskId} filled in. Press Connect.`
+        : `${host.origin} — now enter the Desk ID shown on that machine.`,
+      type: 'success',
+      duration: 6000,
+    });
+  };
+
+  /**
+   * Sweeps the local network for a host and shows what it found.
+   *
+   * Everything that makes this correct lives in `hostDiscovery`; what matters
+   * here is that the result is *shown*. The previous version set the server
+   * address to the first thing that answered — which, on a machine running the
+   * app, is its own embedded server — and announced a discovery with nothing
+   * behind it to connect to.
+   */
   const handleScanLan = async () => {
     setIsScanningLan(true);
-    showToast({
-      title: 'Scanning Local Network...',
-      description: 'Looking for RemoteDesk host on LAN ports...',
-      type: 'info',
-      duration: 3000,
-    });
+    setDiscoveredHosts([]);
+    setScanSummary(null);
+    setScanProgress({ done: 0, total: 0 });
 
-    const candidates = [
-      'http://localhost:4000',
-      'http://127.0.0.1:4000',
-      'http://192.168.31.217:4000',
-      'http://192.168.1.50:4000',
-      'http://192.168.1.100:4000',
-      'http://192.168.0.100:4000',
-      'http://10.0.0.2:4000',
-    ];
-
-    let found = false;
-    for (const url of candidates) {
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 1200);
-        const res = await fetch(`${url}/network-info`, { signal: controller.signal });
-        clearTimeout(timeoutId);
-        if (res.ok) {
-          setServerUrlInput(url);
-          localStorage.setItem('remotedesk_signal_url', url);
-          showToast({
-            title: 'Host Discovered!',
-            description: `Connected to host at ${url}`,
-            type: 'success',
-            duration: 4000,
-          });
-          found = true;
-          break;
-        }
-      } catch {
-        // try next candidate
-      }
-    }
-
-    if (!found) {
-      showToast({
-        title: 'No Host Auto-Detected',
-        description: 'Please type your Host PC\'s IP (e.g. http://192.168.x.x:4000) or Cloudflare URL in Server Address.',
-        type: 'warning',
-        duration: 5000,
+    try {
+      const { hosts, scanned, networks } = await scanForHosts({
+        // This machine's own server, never the one saved from a previous
+        // connection: the scan has to run here, and a remote host refuses to
+        // scan its network on our behalf.
+        selfOrigin: getHostSignalUrl(),
+        onProgress: (done, total) => setScanProgress({ done, total }),
+        onHost: (host) =>
+          setDiscoveredHosts((current) =>
+            [...current, host].sort((a, b) => b.rooms - a.rooms || a.origin.localeCompare(b.origin))
+          ),
       });
+
+      const sharing = hosts.filter(isSharing);
+
+      if (sharing.length === 1) {
+        // One unambiguous answer: fill the form in rather than making the
+        // operator retype what the scan already knows.
+        applyDiscoveredHost(sharing[0]);
+      } else if (sharing.length === 0 && hosts.length === 0) {
+        setScanSummary(
+          scanned === 0
+            ? 'No local network address was found on this machine, so there was nothing to scan. Type the host address manually.'
+            : `Nothing answered on ${networks.join(', ') || 'this network'} (${scanned} addresses checked). Check the host is running and both machines are on the same Wi-Fi.`
+        );
+        showToast({
+          title: 'No Host Found',
+          description: "Type the host's address, e.g. http://192.168.x.x:4000",
+          type: 'warning',
+          duration: 5000,
+        });
+      } else if (sharing.length === 0) {
+        setScanSummary(
+          `Found ${hosts.length} machine(s) running RemoteDesk, but none is sharing a screen yet. Start sharing on the host, then scan again.`
+        );
+      } else {
+        setScanSummary(`${sharing.length} hosts are sharing. Pick the one you want.`);
+      }
+    } catch (error) {
+      setScanSummary(`Scan failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setIsScanningLan(false);
+      setScanProgress(null);
     }
-    setIsScanningLan(false);
   };
 
   // WebRTC Hook
@@ -693,7 +726,13 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
               title="Auto-scan local Wi-Fi / LAN for running RemoteDesk Host"
             >
               {isScanningLan ? <Loader2 className="w-3 h-3 animate-spin" /> : <Search className="w-3 h-3" />}
-              <span>{isScanningLan ? 'Scanning...' : 'Scan LAN'}</span>
+              <span>
+                {isScanningLan
+                  ? scanProgress && scanProgress.total > 0
+                    ? `Scanning ${scanProgress.done}/${scanProgress.total}`
+                    : 'Scanning...'
+                  : 'Scan LAN'}
+              </span>
             </button>
           </div>
 
@@ -717,6 +756,65 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
             </span>
           </div>
         </div>
+
+        {/* Hosts found on this network — the result of a scan, made pickable */}
+        {(discoveredHosts.length > 0 || scanSummary) && (
+          <div className="mt-3 rounded-xl border border-cyan-500/20 bg-[#07080f]/80 p-3 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-bold font-mono text-cyan-300 flex items-center gap-1.5">
+                <Compass className="w-3.5 h-3.5" />
+                Hosts On This Network
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  setDiscoveredHosts([]);
+                  setScanSummary(null);
+                }}
+                className="text-[11px] font-mono text-slate-500 hover:text-slate-300 transition-colors"
+              >
+                Clear
+              </button>
+            </div>
+
+            {discoveredHosts.map((host) => {
+              const deskId = autofillDeskId(host);
+              const sharing = isSharing(host);
+              return (
+                <div
+                  key={host.origin}
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-cyan-500/15 bg-[#0c0e18] px-3 py-2"
+                >
+                  <div className="min-w-0 space-y-0.5">
+                    <div className="font-mono text-xs text-cyan-200 truncate">{host.origin}</div>
+                    <div className="text-[11px] text-slate-400 font-mono">
+                      {!sharing
+                        ? 'Running, but not sharing a screen yet'
+                        : deskId
+                          ? `Sharing Desk ID ${deskId}`
+                          : host.desks.length > 0
+                            ? 'Sharing — read the Desk ID off that machine'
+                            : `Sharing ${host.rooms} desk(s) — read the Desk ID off that machine`}
+                      {host.desks.some((d) => d.requiresPin) && ' · PIN required'}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => applyDiscoveredHost(host)}
+                    disabled={!sharing}
+                    className="px-3 py-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 text-[11px] font-bold font-mono transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                  >
+                    Use This Host
+                  </button>
+                </div>
+              );
+            })}
+
+            {scanSummary && (
+              <p className="text-[11px] text-slate-400 font-mono leading-relaxed">{scanSummary}</p>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Main Content Grid */}
