@@ -13,8 +13,23 @@ export interface WebRTCOptions {
   unattended?: boolean;
   pin?: string;
   onRemotePacket?: (packet: RemoteControlPacket) => void;
+  /**
+   * A client is waiting for the person at this machine to let it in.
+   *
+   * Without a handler the request is denied, which is the only safe default:
+   * an unanswered request must not become an admission.
+   */
+  onJoinRequest?: (request: JoinRequest) => void;
   onRemoteMouse?: (packet: RemoteMouseMovePayload) => void;
   iceServers?: RTCIceServer[];
+}
+
+/** A client held at the door, waiting for the host operator's answer. */
+export interface JoinRequest {
+  requestId: string;
+  peerId: string;
+  /** What the client presented, so the operator can see a near miss. */
+  pin: string;
 }
 
 export interface WebRTCStats {
@@ -187,6 +202,7 @@ export function useWebRTC(options: WebRTCOptions = {}) {
     unattended = true,
     pin: initialPin,
     onRemotePacket,
+    onJoinRequest,
     onRemoteMouse,
     iceServers = getCustomIceServers(),
   } = options;
@@ -222,6 +238,7 @@ export function useWebRTC(options: WebRTCOptions = {}) {
   const roomIdRef = useRef<string | null>(initialRoomId || null);
   const remotePeerIdRef = useRef<string | null>(null);
   const onRemotePacketRef = useRef(onRemotePacket);
+  const onJoinRequestRef = useRef(onJoinRequest);
   const onRemoteMouseRef = useRef(onRemoteMouse);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const socketRef = useRef<Socket | null>(null);
@@ -233,6 +250,7 @@ export function useWebRTC(options: WebRTCOptions = {}) {
   const statsIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const unattendedRef = useRef<boolean>(unattended);
   const pinRef = useRef<string | undefined>(initialPin);
+  const requireApprovalRef = useRef<boolean>(false);
 
   // Mutable packet counters
   const packetsSentRef = useRef<number>(0);
@@ -258,6 +276,10 @@ export function useWebRTC(options: WebRTCOptions = {}) {
   useEffect(() => {
     onRemotePacketRef.current = onRemotePacket;
   }, [onRemotePacket]);
+
+  useEffect(() => {
+    onJoinRequestRef.current = onJoinRequest;
+  }, [onJoinRequest]);
 
   useEffect(() => {
     onRemoteMouseRef.current = onRemoteMouse;
@@ -737,6 +759,7 @@ export function useWebRTC(options: WebRTCOptions = {}) {
               roomId: roomIdRef.current,
               unattended: unattendedRef.current,
               pin: pinRef.current,
+              requireApproval: requireApprovalRef.current,
             });
           } else if (roleRef.current === 'client') {
             socket?.emit('client:join', {
@@ -787,11 +810,23 @@ export function useWebRTC(options: WebRTCOptions = {}) {
       // a pin that has since moved on. There is no human-approval UI behind
       // this event today, so the only honest response is to deny: the server
       // already told us why.
-      socket.on('peer:join-request', ({ requestId }: { requestId: string; peerId: string; pin: string }) => {
-        socket?.emit('host:auth-result', {
-          requestId,
-          granted: false,
-          reason: 'PIN did not match',
+      socket.on('peer:join-request', (request: { requestId: string; peerId: string; pin: string }) => {
+        const handler = onJoinRequestRef.current;
+        if (!handler) {
+          // Nothing is listening, so nobody can say yes. Denying is the only
+          // honest answer: leaving it unanswered would hold the client until
+          // the server's timeout and read as a broken app instead of a refusal.
+          socket?.emit('host:auth-result', {
+            requestId: request.requestId,
+            granted: false,
+            reason: 'The host did not answer',
+          });
+          return;
+        }
+        handler({
+          requestId: request.requestId,
+          peerId: request.peerId,
+          pin: request.pin ?? '',
         });
       });
 
@@ -852,6 +887,7 @@ export function useWebRTC(options: WebRTCOptions = {}) {
               roomId: targetRoomId,
               unattended: isUnattended,
               pin: pin?.trim().toUpperCase(),
+              requireApproval: requireApprovalRef.current,
             });
           } else {
             socket.emit('client:join', {
@@ -891,11 +927,12 @@ export function useWebRTC(options: WebRTCOptions = {}) {
    * from these same refs.
    */
   const registerHost = useCallback(
-    (targetRoomId: string, pin?: string, isUnattended = true) => {
+    (targetRoomId: string, pin?: string, isUnattended = true, requireApproval = false) => {
       roleRef.current = 'host';
       roomIdRef.current = targetRoomId;
       unattendedRef.current = isUnattended;
       pinRef.current = pin?.trim().toUpperCase();
+      requireApprovalRef.current = requireApproval;
 
       setRole('host');
       setRoomId(targetRoomId);
@@ -906,6 +943,7 @@ export function useWebRTC(options: WebRTCOptions = {}) {
           roomId: targetRoomId,
           unattended: isUnattended,
           pin: pinRef.current,
+          requireApproval,
         });
       } else {
         // Not connected yet — the `connect` handler re-emits from the refs set
@@ -915,6 +953,20 @@ export function useWebRTC(options: WebRTCOptions = {}) {
     },
     []
   );
+
+  /**
+   * Answers a client waiting at the door.
+   *
+   * The verdict is the operator's, not the server's: the server escalated
+   * precisely because it could not decide.
+   */
+  const answerJoinRequest = useCallback((requestId: string, granted: boolean, reason?: string) => {
+    socketRef.current?.emit('host:auth-result', {
+      requestId,
+      granted,
+      reason: reason ?? (granted ? 'Allowed by the host' : 'Refused by the host'),
+    });
+  }, []);
 
   // Emergency Panic Button
   const severAllConnections = useCallback(
@@ -1017,6 +1069,7 @@ export function useWebRTC(options: WebRTCOptions = {}) {
     lastReceivedEventPacket,
     joinRoom,
     registerHost,
+    answerJoinRequest,
     leaveRoom,
     severAllConnections,
     sendMousePacket,

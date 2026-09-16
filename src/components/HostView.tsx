@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Monitor,
   Tv,
@@ -47,6 +48,15 @@ import { SessionSecurityCard } from './SessionSecurityCard';
 import { TelemetryStatsPanel } from './TelemetryStatsPanel';
 import { ClipboardSyncCard } from './ClipboardSyncCard';
 import { useToast } from './ToastSystem';
+import {
+  AccessMode,
+  MachineProfile,
+  loadProfile,
+  registrationSecret,
+  updateProfile,
+} from '../utils/machineProfile';
+import { makeConnectLink } from '../utils/deviceBook';
+import { tauriOpenSessionInBrowser } from '../utils/tauriBridge';
 
 interface HostViewProps {
   onSwitchToClient?: (roomId: string, pin?: string) => void;
@@ -65,6 +75,37 @@ const CAN_CAPTURE_SCREEN =
   typeof navigator !== 'undefined' &&
   typeof navigator.mediaDevices?.getDisplayMedia === 'function';
 
+/**
+ * Why this page cannot capture a screen, in the operator's terms.
+ *
+ * "Screen capture unavailable" is useless on its own: the two causes need
+ * opposite fixes, and the commonest one — a page opened over a LAN address, so
+ * not a secure context, so `navigator.mediaDevices` does not even exist — looks
+ * exactly like a missing feature while being a one-click fix.
+ */
+function captureDiagnosis(): { reason: string; fix: string } | null {
+  if (CAN_CAPTURE_SCREEN) return null;
+
+  const insecure =
+    typeof window !== 'undefined' &&
+    !window.isSecureContext &&
+    window.location.protocol === 'http:';
+
+  if (insecure) {
+    return {
+      reason: `This page was opened over ${window.location.origin}, which browsers treat as insecure — screen capture is switched off entirely on such pages.`,
+      fix: 'Open RemoteDesk on the machine you want to share and use the button below, which opens the same page on that machine over localhost, where capture is allowed.',
+    };
+  }
+
+  return {
+    reason: 'This window has no screen-capture API at all.',
+    fix: 'On Linux the app window often cannot capture; use the button below to run the session in your own browser instead. Installing xdg-desktop-portal and the backend for your desktop (‑gnome, ‑kde or ‑wlr) fixes it for the app window too. On Windows, update the WebView2 Runtime.',
+  };
+}
+
+const CAPTURE_DIAGNOSIS = captureDiagnosis();
+
 export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
   const { showToast } = useToast();
 
@@ -72,15 +113,24 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
   const [activeStream, setActiveStream] = useState<MediaStream | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
 
-  // Room ID (6-digit format like AnyDesk)
-  const [roomId] = useState<string>(() =>
-    Math.floor(100000 + Math.random() * 900000).toString()
-  );
+  // This machine's identity, loaded from the app. The Desk ID used to be drawn
+  // at random here, which made it change on every launch and every reload —
+  // nothing could be saved against it, and every link already shared went
+  // stale. It is issued once now and kept; see utils/machineProfile.
+  const [profile, setProfile] = useState<MachineProfile | null>(null);
+  const roomId = profile?.deskId ?? '';
+  const accessMode: AccessMode = profile?.accessMode ?? 'ask';
+  const [passwordDraft, setPasswordDraft] = useState('');
+
+  /** A client waiting for this operator to let it in. */
+  const [pendingJoin, setPendingJoin] = useState<{
+    requestId: string;
+    peerId: string;
+    pin: string;
+  } | null>(null);
   const [copiedRoom, setCopiedRoom] = useState(false);
   const [copiedPin, setCopiedPin] = useState(false);
 
-  // Unattended Access (AnyDesk style - no need to walk to host server!)
-  const [unattendedAccess, setUnattendedAccess] = useState<boolean>(true);
   const [lanEndpoints, setLanEndpoints] = useState<string[]>([]);
   const [firewallBlocked, setFirewallBlocked] = useState<{ fixCommand: string } | null>(null);
   // Hosting always uses this machine's own signaling server.
@@ -191,6 +241,7 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
     dataChannelsReady,
     stats,
     registerHost,
+    answerJoinRequest,
     leaveRoom,
     severAllConnections,
     sendEventPacket,
@@ -198,11 +249,17 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
   } = useWebRTC({
     role: 'host',
     roomId,
-    unattended: unattendedAccess,
-    pin: unattendedAccess ? undefined : rotatingPin,
+    unattended: accessMode === 'open',
+    pin: registrationSecret(
+      profile ?? { deskId: roomId, name: '', accessMode, accessPassword: null },
+      rotatingPin
+    ).pin,
     localStream: activeStream,
     serverUrl,
     onRemotePacket: (packet) => handleIncomingPacket(packet),
+    // Somebody is knocking. Showing the request is the whole of "ask me each
+    // time"; with no handler the hook denies, which is safe but useless.
+    onJoinRequest: (request) => setPendingJoin(request),
     onRemoteMouse: (mouse) => {
       if (killSwitchActive) return;
       if (canControlHost()) {
@@ -254,8 +311,23 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
   // PIN; `registerHost` deliberately leaves an established peer connection
   // alone, so toggling a setting mid-session does not drop the client.
   useEffect(() => {
-    registerHost(roomId, unattendedAccess ? undefined : rotatingPin, unattendedAccess);
-  }, [registerHost, roomId, unattendedAccess, rotatingPin]);
+    if (!profile) return;
+    const { pin, unattended, requireApproval } = registrationSecret(profile, rotatingPin);
+    registerHost(roomId, pin, unattended, requireApproval);
+  }, [registerHost, roomId, profile, rotatingPin]);
+
+  // Load this machine's identity once, before anything is published.
+  useEffect(() => {
+    let cancelled = false;
+    void loadProfile().then((loaded) => {
+      if (cancelled) return;
+      setProfile(loaded);
+      setPasswordDraft(loaded.accessPassword ?? '');
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Wire up FileTransferManager callbacks
   useEffect(() => {
@@ -350,24 +422,26 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
   // the session does not start: a remote viewer must never be shown anything
   // other than this machine's actual display.
   const handleStartSharing = async () => {
-    if (!CAN_CAPTURE_SCREEN) {
+    if (CAPTURE_DIAGNOSIS) {
       showToast({
-        title: 'Screen Capture Unavailable Here',
-        description:
-          'This page cannot capture a screen, so it cannot host. Open RemoteDesk on the machine you want to share, and use this page to connect to it.',
+        title: 'This window cannot share a screen',
+        description: `${CAPTURE_DIAGNOSIS.reason} ${CAPTURE_DIAGNOSIS.fix}`,
         type: 'error',
-        duration: 7000,
+        duration: 10000,
       });
       return;
     }
 
     let stream: MediaStream;
     try {
+      // No `displaySurface` constraint. Asking for `monitor` tells the browser
+      // the operator wants a whole screen, and several — Firefox, and WebKit
+      // through the desktop portal — take that as the answer rather than a
+      // preference, so no picker appears and single windows cannot be shared
+      // at all. Leaving it out is what puts the choice of screen, window or
+      // tab back in front of the person sharing.
       stream = await navigator.mediaDevices.getDisplayMedia({
-        video: {
-          frameRate: { ideal: 60, max: 60 },
-          displaySurface: 'monitor',
-        },
+        video: { frameRate: { ideal: 60, max: 60 } },
         audio: false,
       });
     } catch (err) {
@@ -405,7 +479,10 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
     // this only refreshes the access settings. Calling joinRoom here would
     // rebuild the peer connection and disconnect a client that had already
     // joined and was waiting for the operator to pick a screen.
-    registerHost(roomId, unattendedAccess ? undefined : rotatingPin, unattendedAccess);
+    if (profile) {
+      const { pin, unattended, requireApproval } = registrationSecret(profile, rotatingPin);
+      registerHost(roomId, pin, unattended, requireApproval);
+    }
 
     showToast({
       title: 'Screen Broadcast Active',
@@ -449,6 +526,100 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
     };
   }, [activeStream]);
 
+  /**
+   * Moves the session into the operator's own browser.
+   *
+   * The app asks the browser to open the page it is already serving over
+   * loopback, which is a secure context and therefore allowed to capture — the
+   * same page, the same signaling server, the same machine.
+   */
+  const handleOpenInBrowser = async () => {
+    const opened = await tauriOpenSessionInBrowser();
+    if (opened) {
+      showToast({
+        title: 'Opening in your browser',
+        description: `${opened} — share your screen from that window instead.`,
+        type: 'success',
+        duration: 7000,
+      });
+      return;
+    }
+    // Not in the app: the page cannot open a privileged local URL for itself,
+    // so tell the operator what to open rather than pretending to do it.
+    showToast({
+      title: 'Open RemoteDesk on that machine',
+      description:
+        'This page is not the app, so it cannot open the local session page for you. On the machine you want to share, open RemoteDesk and start sharing there.',
+      type: 'info',
+      duration: 8000,
+    });
+  };
+
+  /** Switches how this machine admits clients, and republishes the desk. */
+  const handleAccessModeChange = async (mode: AccessMode) => {
+    if (mode === 'password' && !passwordDraft.trim() && !profile?.accessPassword) {
+      showToast({
+        title: 'Set a password first',
+        description: 'Type the password the other machine will save, then press Save.',
+        type: 'warning',
+        duration: 5000,
+      });
+      // Show the field so there is something to type into.
+      setProfile((current) => (current ? { ...current, accessMode: 'password' } : current));
+      return;
+    }
+    try {
+      setProfile(await updateProfile({ accessMode: mode }));
+    } catch (err) {
+      showToast({
+        title: 'Could not change access',
+        description: err instanceof Error ? err.message : String(err),
+        type: 'error',
+        duration: 6000,
+      });
+    }
+  };
+
+  const handleSavePassword = async () => {
+    try {
+      const updated = await updateProfile({
+        accessPassword: passwordDraft.trim() || null,
+        accessMode: passwordDraft.trim() ? 'password' : 'ask',
+      });
+      setProfile(updated);
+      showToast({
+        title: passwordDraft.trim() ? 'Password saved' : 'Password cleared',
+        description: passwordDraft.trim()
+          ? 'Save this machine on the other device and it will connect in one click.'
+          : 'This machine will ask you before letting anyone in.',
+        type: 'success',
+        duration: 5000,
+      });
+    } catch (err) {
+      showToast({
+        title: 'Could not save the password',
+        description: err instanceof Error ? err.message : String(err),
+        type: 'error',
+        duration: 6000,
+      });
+    }
+  };
+
+  /** Answers the client waiting at the door. */
+  const handleAnswerJoin = (granted: boolean) => {
+    if (!pendingJoin) return;
+    answerJoinRequest(pendingJoin.requestId, granted);
+    setPendingJoin(null);
+    showToast({
+      title: granted ? 'Client allowed in' : 'Client refused',
+      description: granted
+        ? 'They can now see this screen.'
+        : 'They were told this machine refused.',
+      type: granted ? 'success' : 'info',
+      duration: 4000,
+    });
+  };
+
   // Copy Room ID
   const handleCopyRoomId = () => {
     navigator.clipboard.writeText(roomId);
@@ -462,16 +633,41 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
     setTimeout(() => setCopiedRoom(false), 2000);
   };
 
-  // Copy Full 1-Click Connection Link (Server URL + Desk ID)
+  /**
+   * Copies one link that carries everything the other machine needs.
+   *
+   * Every address this host knows rides along, LAN first and the public tunnel
+   * last, so the same link keeps working from another network — and a local
+   * connection is never routed over the internet just because a tunnel exists.
+   * The saved password goes with it, because a link that still needs a secret
+   * read off this screen has not saved anybody the trip.
+   */
   const handleCopyFullLink = () => {
-    const primaryUrl = tunnelUrl || (lanEndpoints.length > 0 ? lanEndpoints[0] : (typeof window !== 'undefined' ? `http://${window.location.hostname}:4000` : 'http://localhost:4000'));
-    const fullLink = `${primaryUrl}#${roomId}`;
-    navigator.clipboard.writeText(fullLink);
+    const addresses = [
+      ...lanEndpoints,
+      ...(tunnelUrl ? [tunnelUrl] : []),
+    ];
+    if (addresses.length === 0) {
+      addresses.push(
+        typeof window !== 'undefined' ? window.location.origin : 'http://localhost:4000'
+      );
+    }
+
+    const link = makeConnectLink({
+      name: profile?.name,
+      deskId: roomId,
+      addresses,
+      pin: accessMode === 'password' ? profile?.accessPassword : null,
+    });
+    navigator.clipboard.writeText(link);
     showToast({
-      title: '1-Click Connect Link Copied!',
-      description: `Copied ${fullLink} — Paste on your laptop to connect instantly!`,
+      title: 'Connect link copied',
+      description:
+        accessMode === 'password'
+          ? 'Paste it into My Devices on the other machine — password included, so it connects in one click.'
+          : 'Paste it into My Devices on the other machine to save this desk.',
       type: 'success',
-      duration: 5000,
+      duration: 6000,
     });
   };
 
@@ -539,6 +735,74 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto pb-2">
+      {/* This window cannot share, and saying so up front beats a dead button. */}
+      {CAPTURE_DIAGNOSIS && (
+        <div className="bg-amber-950/30 border border-amber-500/40 rounded-2xl p-4 space-y-2.5">
+          <h3 className="text-sm font-bold text-amber-200 flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4" />
+            This window cannot share its screen
+          </h3>
+          <p className="text-xs text-amber-100/80 leading-relaxed">{CAPTURE_DIAGNOSIS.reason}</p>
+          <p className="text-xs text-amber-100/60 leading-relaxed">{CAPTURE_DIAGNOSIS.fix}</p>
+          <button
+            type="button"
+            onClick={() => void handleOpenInBrowser()}
+            className="px-3.5 py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/40 text-amber-100 text-xs font-bold font-mono"
+          >
+            Run this session in my browser
+          </button>
+        </div>
+      )}
+
+      {/* Somebody is asking to connect. Nothing happens until this is answered.
+          Rendered into the body so it is visible from any tab: the host view
+          itself is hidden while another tab is showing, and a prompt nobody
+          can see is the same as a session that never connects. */}
+      {pendingJoin &&
+        createPortal(
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md bg-[#0c0e18] border border-cyan-400/40 rounded-2xl p-6 shadow-[0_0_50px_rgba(6,182,212,0.2)] space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-11 h-11 rounded-xl bg-cyan-500/15 border border-cyan-500/40 flex items-center justify-center">
+                <Shield className="w-5 h-5 text-cyan-300" />
+              </div>
+              <div>
+                <h3 className="text-lg font-extrabold text-white">Someone wants to connect</h3>
+                <p className="text-xs text-slate-400 font-mono">
+                  Peer {pendingJoin.peerId} · Desk {roomId}
+                </p>
+              </div>
+            </div>
+
+            <p className="text-sm text-slate-300 leading-relaxed">
+              They will see this screen and can control this machine.{' '}
+              {pendingJoin.pin
+                ? 'They sent a password, but it did not match.'
+                : 'They sent no password.'}{' '}
+              Only allow this if you know who it is.
+            </p>
+
+            <div className="flex items-center gap-2.5">
+              <button
+                type="button"
+                onClick={() => handleAnswerJoin(true)}
+                className="flex-1 px-4 py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 text-slate-950 text-sm font-extrabold font-mono"
+              >
+                Allow
+              </button>
+              <button
+                type="button"
+                onClick={() => handleAnswerJoin(false)}
+                className="flex-1 px-4 py-2.5 rounded-xl bg-rose-600/90 hover:bg-rose-500 text-white text-sm font-bold font-mono"
+              >
+                Refuse
+              </button>
+            </div>
+          </div>
+        </div>,
+          document.body
+        )}
+
       {/* Top Banner with AnyDesk-Style Desk ID and Unattended Access Mode */}
       <div className="bg-[#0c0e18]/95 border border-cyan-500/25 rounded-2xl p-6 shadow-[0_8px_32px_rgba(0,0,0,0.5)] backdrop-blur-xl relative overflow-hidden">
         <div className="absolute -right-16 -top-16 w-64 h-64 bg-cyan-500/10 rounded-full blur-3xl pointer-events-none" />
@@ -602,35 +866,69 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
               </div>
             </div>
 
-            {/* Unattended Access Toggle */}
-            <div
-              onClick={() => setUnattendedAccess(!unattendedAccess)}
-              className={`border rounded-xl p-3 flex items-center gap-3 shadow-lg cursor-pointer transition-all ${
-                unattendedAccess
-                  ? 'bg-emerald-950/30 border-emerald-500/40 text-emerald-300'
-                  : 'bg-slate-900/60 border-slate-700 text-slate-300'
-              }`}
-              title="Click to toggle Unattended Access mode"
-            >
-              <div>
-                <div className="text-[10px] uppercase font-mono text-slate-400 font-semibold flex items-center gap-1">
-                  <Shield className="w-3 h-3 text-emerald-400" />
-                  Unattended Access
-                </div>
-                <div className="text-sm font-bold flex items-center gap-1.5 mt-0.5">
-                  {unattendedAccess ? (
-                    <span className="text-emerald-400 flex items-center gap-1">
-                      <Check className="w-3.5 h-3.5" /> Auto-Accept ON
-                    </span>
-                  ) : (
-                    <span className="text-amber-400">PIN Required</span>
-                  )}
-                </div>
+            {/* How this machine admits a client */}
+            <div className="bg-[#07080f] border border-cyan-500/25 rounded-xl p-3 space-y-2 shadow-lg min-w-64">
+              <div className="text-[10px] uppercase font-mono text-slate-400 font-semibold flex items-center gap-1">
+                <Shield className="w-3 h-3 text-emerald-400" />
+                Who can connect
               </div>
+
+              <div className="grid grid-cols-2 gap-1.5">
+                {(
+                  [
+                    ['password', 'Saved password'],
+                    ['ask', 'Ask me first'],
+                    ['rotating', 'Rotating PIN'],
+                    ['open', 'Anyone with ID'],
+                  ] as Array<[AccessMode, string]>
+                ).map(([mode, label]) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => void handleAccessModeChange(mode)}
+                    className={`px-2 py-1.5 rounded-lg text-[11px] font-bold font-mono border transition-colors ${
+                      accessMode === mode
+                        ? 'bg-cyan-500/20 border-cyan-400/60 text-cyan-200'
+                        : 'bg-[#0c0e18] border-slate-700 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {accessMode === 'password' && (
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="text"
+                    value={passwordDraft}
+                    onChange={(e) => setPasswordDraft(e.target.value)}
+                    placeholder="Set a password"
+                    className="flex-1 min-w-0 bg-[#0c0e18] border border-cyan-500/30 rounded-lg px-2.5 py-1.5 text-cyan-100 text-xs font-mono focus:outline-none focus:border-cyan-400"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void handleSavePassword()}
+                    className="px-2.5 py-1.5 rounded-lg bg-cyan-500/15 border border-cyan-500/30 text-cyan-300 text-[11px] font-bold font-mono"
+                  >
+                    Save
+                  </button>
+                </div>
+              )}
+
+              <p className="text-[10px] text-slate-500 font-mono leading-relaxed">
+                {accessMode === 'password'
+                  ? 'The other machine saves this password once and reconnects in one click.'
+                  : accessMode === 'ask'
+                    ? 'Nobody gets in until you say yes here.'
+                    : accessMode === 'rotating'
+                      ? 'Read the PIN below to whoever is connecting. It changes every minute.'
+                      : 'Anyone who knows this Desk ID can take control. Use on trusted networks only.'}
+              </p>
             </div>
 
-            {/* PIN Badge (if PIN enabled) */}
-            {!unattendedAccess && (
+            {/* PIN Badge — only the rotating rule has one to read */}
+            {accessMode === 'rotating' && (
               <div className="bg-[#07080f] border border-emerald-500/30 rounded-xl p-3 flex items-center gap-2 shadow-lg">
                 <div>
                   <div className="text-[10px] uppercase font-mono text-slate-400 font-semibold">PIN ({pinRemainingSeconds}s)</div>
@@ -765,7 +1063,12 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
                 {onSwitchToClient && (
                   <button
                     id="simulate-client-button"
-                    onClick={() => onSwitchToClient(roomId, unattendedAccess ? undefined : rotatingPin)}
+                    onClick={() =>
+                      onSwitchToClient(
+                        roomId,
+                        profile ? registrationSecret(profile, rotatingPin).pin : undefined
+                      )
+                    }
                     className="px-3 py-1.5 rounded-xl bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 text-xs font-medium flex items-center gap-1.5 transition-colors"
                   >
                     <span>Test Client View</span>

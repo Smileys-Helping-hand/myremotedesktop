@@ -3,6 +3,7 @@ import { Loader2 } from 'lucide-react';
 import { Header, ActiveTab } from './components/Header';
 import { HostView } from './components/HostView';
 import { ClientView } from './components/ClientView';
+import { DevicesView, ConnectTarget } from './components/DevicesView';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ToastProvider } from './components/ToastSystem';
 import { UpdateBanner } from './components/UpdateBanner';
@@ -34,14 +35,31 @@ function TabLoading() {
   );
 }
 
+/** A connect request, stamped so that picking the same device twice re-fires. */
+export interface ClientRequest extends ConnectTarget {
+  nonce: number;
+}
+
 export default function App() {
-  const [activeTab, setActiveTab] = useState<ActiveTab>('host');
+  // Saved devices are the front door: one click from here is the whole point
+  // of the app, and the Host tab is a step behind it rather than the landing
+  // page it used to be.
+  const [activeTab, setActiveTab] = useState<ActiveTab>('devices');
   const [sharedRoomId, setSharedRoomId] = useState<string>('784920');
   const [sharedPin, setSharedPin] = useState<string>('');
+  const [clientRequest, setClientRequest] = useState<ClientRequest | null>(null);
 
   const handleSwitchToClient = (roomId: string, pin?: string) => {
     setSharedRoomId(roomId);
     if (pin) setSharedPin(pin);
+    setActiveTab('client');
+  };
+
+  /** Connecting from the device book: carry the whole target to the client. */
+  const handleConnectDevice = (target: ConnectTarget) => {
+    setClientRequest({ ...target, nonce: Date.now() });
+    setSharedRoomId(target.deskId);
+    setSharedPin(target.pin ?? '');
     setActiveTab('client');
   };
 
@@ -67,11 +85,24 @@ export default function App() {
         <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 pt-6 pb-8">
           <ErrorBoundary fallbackTitle="Remote Desktop Workspace Fault">
             <Suspense fallback={<TabLoading />}>
-              {activeTab === 'host' && <HostView onSwitchToClient={handleSwitchToClient} />}
+              {activeTab === 'devices' && <DevicesView onConnect={handleConnectDevice} />}
+
+              {/* The host stays mounted whichever tab is showing.
+                  Unmounting it closed the signaling socket, which took the
+                  room with it: this machine's Desk ID stopped existing the
+                  moment its owner looked at another tab, and anyone trying to
+                  reach it was told no host was sharing that ID. A machine is
+                  reachable while its app is open, or "saved device" means
+                  nothing. The approval prompt portals to the body, so a knock
+                  is answerable from wherever the operator happens to be. */}
+              <div hidden={activeTab !== 'host'}>
+                <HostView onSwitchToClient={handleSwitchToClient} />
+              </div>
               {activeTab === 'client' && (
                 <ClientView
                   initialRoomId={sharedRoomId}
                   initialPin={sharedPin}
+                  connectRequest={clientRequest}
                   onSwitchToHost={handleSwitchToHost}
                 />
               )}

@@ -4,10 +4,12 @@
 //! enumerating physical displays, injecting mouse/keyboard input, and the
 //! safety interlocks around that injection.
 
+mod devices;
 mod discovery;
 mod input;
 mod keymap;
 mod platform;
+mod profile;
 mod signaling;
 mod tunnel;
 
@@ -612,7 +614,6 @@ fn install_web_client(app: &AppHandle) {
 /// Only used where the webview cannot run a session itself. The browser is a
 /// full peer: it loads the same app from this process and talks to the same
 /// signaling server, so nothing about the session is second-class.
-#[cfg(target_os = "linux")]
 fn open_web_client(app: &AppHandle) {
     use tauri_plugin_opener::OpenerExt;
 
@@ -642,6 +643,27 @@ fn open_web_client(app: &AppHandle) {
             );
         }
     }
+}
+
+/// Opens this app's session UI in the operator's own browser, on request.
+///
+/// The automatic handoff only fires where the webview cannot run WebRTC at all.
+/// This is the manual door for everything else it cannot do — most of all
+/// screen capture, which on Linux depends on a desktop portal the webview may
+/// not be able to reach even though the browser next to it can.
+#[tauri::command]
+fn open_session_in_browser() -> Result<String, String> {
+    let app = APP.get().ok_or("the app is not ready yet")?;
+    let signaling = app
+        .state::<AppState>()
+        .signaling
+        .clone()
+        .ok_or("the embedded signaling server is not running")?;
+    let url = signaling
+        .local_url_public()
+        .ok_or("the embedded signaling server has no port")?;
+    open_web_client(app);
+    Ok(url)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -674,6 +696,19 @@ pub fn run() {
 
                 let _ = APP.set(app.handle().clone());
 
+                // The device book has to be readable by the browser page too
+                // (the Linux session UI), so it is loaded here and served over
+                // the embedded server rather than kept in the webview.
+                match app.path().app_config_dir() {
+                    Ok(dir) => {
+                        devices::init(dir.join("devices.json"));
+                        // The Desk ID has to be the same one it was yesterday,
+                        // or every saved device and shared link goes stale.
+                        profile::init(dir.join("profile.json"));
+                    }
+                    Err(err) => eprintln!("[remotedesk] no config directory: {err}"),
+                }
+
                 install_web_client(app.handle());
                 install_control_handler(app.handle());
 
@@ -702,6 +737,7 @@ pub fn run() {
             firewall_status,
             update_capability,
             get_signal_url,
+            open_session_in_browser,
             get_network_info,
             report_webview_capabilities,
         ])

@@ -160,6 +160,24 @@ export async function tauriGetSignalUrl(): Promise<string | null> {
   }
 }
 
+/**
+ * Opens this app's session UI in the operator's real browser.
+ *
+ * The one reliable escape hatch when the app's own window cannot do something
+ * the browser next to it can — on Linux that is usually screen capture, which
+ * goes through a desktop portal WebKitGTK may not reach. Returns the URL that
+ * was opened, or `null` outside Tauri.
+ */
+export async function tauriOpenSessionInBrowser(): Promise<string | null> {
+  if (!isTauri()) return null;
+  try {
+    return (await invoke<string>('open_session_in_browser')) ?? null;
+  } catch (err) {
+    console.warn('[Tauri] open_session_in_browser error:', err);
+    return null;
+  }
+}
+
 /** LAN addresses and live room/peer counts for the embedded signaling server. */
 export async function tauriGetNetworkInfo(): Promise<NetworkInfo | null> {
   if (!isTauri()) return null;

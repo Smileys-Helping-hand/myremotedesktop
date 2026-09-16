@@ -48,14 +48,35 @@ import {
   autofillDeskId,
   DiscoveredHost,
 } from '../utils/hostDiscovery';
+import { deviceKey, saveDevice, touchDevice } from '../utils/deviceBook';
+
+/** A device the operator picked in the device book, to connect to now. */
+export interface ClientConnectRequest {
+  deviceId?: string;
+  name: string;
+  deskId: string;
+  /** Tried in order, so a machine reachable on the LAN is never sent over a tunnel. */
+  addresses: string[];
+  pin?: string | null;
+  /** Changes on every request, so picking the same device twice reconnects. */
+  nonce: number;
+}
 
 interface ClientViewProps {
   initialRoomId?: string;
   initialPin?: string;
+  connectRequest?: ClientConnectRequest | null;
   onSwitchToHost?: () => void;
 }
 
-export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPin }) => {
+/** How long one saved address gets to answer before the next is tried. */
+const ADDRESS_TIMEOUT_MS = 6000;
+
+export const ClientView: React.FC<ClientViewProps> = ({
+  initialRoomId,
+  initialPin,
+  connectRequest,
+}) => {
   const { showToast } = useToast();
   const [roomIdInput, setRoomIdInput] = useState<string>(initialRoomId || '');
   const [pinInput, setPinInput] = useState<string>(initialPin || '');
@@ -104,6 +125,10 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
   const [scanProgress, setScanProgress] = useState<{ done: number; total: number } | null>(null);
   const [discoveredHosts, setDiscoveredHosts] = useState<DiscoveredHost[]>([]);
   const [scanSummary, setScanSummary] = useState<string | null>(null);
+  /** The device being dialled, and which of its addresses is being tried. */
+  const [dialing, setDialing] = useState<{ request: ClientConnectRequest; index: number } | null>(
+    null
+  );
 
   // Update room ID if initialRoomId prop changes or from URL hash
   useEffect(() => {
@@ -114,6 +139,26 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
       if (hash) setRoomIdInput(hash);
     }
   }, [initialPin, initialRoomId]);
+
+  /** Saves a discovered machine to the device book, so next time is one click. */
+  const rememberHost = async (host: DiscoveredHost) => {
+    const deskId = autofillDeskId(host) ?? roomIdInput.replace(/\s+/g, '').trim();
+    const device = await saveDevice({
+      id: deviceKey(deskId, [host.origin]),
+      name: host.origin.replace(/^https?:\/\//, ''),
+      deskId,
+      addresses: [host.origin],
+      // The PIN in the box is the one that just worked, if the operator typed
+      // one; saving it is the difference between one click and two next time.
+      pin: pinInput.trim() ? pinInput.trim() : null,
+    });
+    showToast({
+      title: 'Saved to My Devices',
+      description: `${device.name} — open the My Devices tab to connect in one click.`,
+      type: 'success',
+      duration: 5000,
+    });
+  };
 
   /** Points the client at a discovered host, filling in whatever it published. */
   const applyDiscoveredHost = (host: DiscoveredHost) => {
@@ -292,6 +337,86 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
   }, []);
 
   // Handle Room Join
+  /**
+   * Points the client at a saved device and starts dialling its first address.
+   *
+   * Keyed on the nonce rather than the device, so picking the same machine
+   * again after a disconnect reconnects instead of doing nothing.
+   */
+  useEffect(() => {
+    if (!connectRequest || connectRequest.addresses.length === 0) return;
+    const first = connectRequest.addresses[0];
+    setRoomIdInput(connectRequest.deskId);
+    setPinInput(connectRequest.pin ?? '');
+    setServerUrlInput(first);
+    localStorage.setItem('remotedesk_signal_url', first);
+    setDialing({ request: connectRequest, index: 0 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connectRequest?.nonce]);
+
+  /**
+   * Walks the saved addresses until one answers.
+   *
+   * A machine that is sometimes on this network and sometimes reached through a
+   * tunnel has both saved. Trying them in order is what makes one saved device
+   * work from anywhere — and why the LAN address must come first, or every
+   * local session would be routed over the internet.
+   */
+  useEffect(() => {
+    if (!dialing) return;
+    const target = dialing.request.addresses[dialing.index];
+    // Wait until the state carrying this address has actually landed, or the
+    // socket we are about to judge is still the previous server's.
+    if (serverUrlInput !== target) return;
+
+    if (isSocketConnected) {
+      setDialing(null);
+      void connectNow(dialing.request);
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      const next = dialing.index + 1;
+      if (next < dialing.request.addresses.length) {
+        const address = dialing.request.addresses[next];
+        setServerUrlInput(address);
+        localStorage.setItem('remotedesk_signal_url', address);
+        setDialing({ request: dialing.request, index: next });
+        showToast({
+          title: `Trying ${dialing.request.name} elsewhere`,
+          description: `No answer at ${target}. Trying ${address}.`,
+          type: 'info',
+          duration: 4000,
+        });
+      } else {
+        setDialing(null);
+        showToast({
+          title: `Could not reach ${dialing.request.name}`,
+          description:
+            'No saved address answered. Check the machine is awake and running RemoteDesk — if it has moved networks, scan again or paste its new connect link.',
+          type: 'error',
+          duration: 8000,
+        });
+      }
+    }, ADDRESS_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dialing, isSocketConnected, serverUrlInput]);
+
+  /** Joins the desk a saved device names, once its server is reachable. */
+  const connectNow = async (request: ClientConnectRequest) => {
+    showToast({
+      title: `Connecting to ${request.name}`,
+      description: `Desk ${request.deskId}`,
+      type: 'info',
+      duration: 3000,
+    });
+    setPanicAlert(null);
+    await joinRoom(request.deskId, 'client', (request.pin ?? '').trim().toUpperCase(), false);
+    setIsJoined(true);
+    if (request.deviceId) void touchDevice(request.deviceId);
+  };
+
   const handleJoin = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     let cleanRoomId = roomIdInput.replace(/\s+/g, '').trim();
@@ -798,14 +923,24 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
                       {host.desks.some((d) => d.requiresPin) && ' · PIN required'}
                     </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => applyDiscoveredHost(host)}
-                    disabled={!sharing}
-                    className="px-3 py-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 text-[11px] font-bold font-mono transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
-                  >
-                    Use This Host
-                  </button>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => applyDiscoveredHost(host)}
+                      disabled={!sharing}
+                      className="px-3 py-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 text-[11px] font-bold font-mono transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      Use This Host
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => rememberHost(host)}
+                      className="px-3 py-1.5 rounded-lg bg-[#07080f] border border-cyan-500/25 text-slate-300 hover:text-cyan-300 text-[11px] font-bold font-mono transition-colors"
+                      title="Save this machine to My Devices"
+                    >
+                      Save
+                    </button>
+                  </div>
                 </div>
               );
             })}

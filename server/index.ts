@@ -59,6 +59,8 @@ interface Room {
   createdAt: number;
   unattended: boolean;
   pin?: string;
+  /** The person at the host answers every join, whatever the PIN says. */
+  requireApproval: boolean;
 }
 
 interface PendingAuth {
@@ -226,10 +228,25 @@ function hostCreate(peerId: string, data: any) {
     createdAt: Date.now(),
     unattended: typeof data === 'object' ? data?.unattended !== false : true,
     pin: normalizePin(data?.pin),
+    requireApproval: data?.requireApproval === true,
   });
 
   log(`room ${roomId} created by host ${peerId} (unattended: ${rooms.get(roomId)!.unattended})`);
   send(peerId, 'host:create:result', { ok: true, roomId, peerId });
+}
+
+/**
+ * Whether this join is admitted without troubling the person at the host.
+ *
+ * Approval wins over everything else: a room that asks must ask, even when it
+ * has no PIN — and a room with no PIN admits everyone, so without this the
+ * "ask me each time" setting would quietly produce an open desk.
+ *
+ * Mirrors admits_without_asking in src-tauri/src/signaling.rs; keep the two in step.
+ */
+function admitsWithoutAsking(room: Room, provided: string | undefined): boolean {
+  if (room.requireApproval) return false;
+  return room.unattended || pinGrantsEntry(room.pin, provided);
 }
 
 function clientJoin(peerId: string, data: any) {
@@ -249,8 +266,7 @@ function clientJoin(peerId: string, data: any) {
     return;
   }
 
-  const pinMatches = pinGrantsEntry(room.pin, pin);
-  if (room.unattended || pinMatches) {
+  if (admitsWithoutAsking(room, pin)) {
     failedJoins.delete(peerId);
     room.clientIds.add(peerId);
 
@@ -388,7 +404,7 @@ app.get('/healthz', (_req, res) => {
 function discoverableHosts() {
   return Array.from(rooms.values())
     .map((room) => ({
-      deskId: !room.unattended || room.pin ? room.roomId : null,
+      deskId: room.requireApproval || !room.unattended || room.pin ? room.roomId : null,
       requiresPin: Boolean(room.pin),
       unattended: room.unattended,
       clients: room.clientIds.size,

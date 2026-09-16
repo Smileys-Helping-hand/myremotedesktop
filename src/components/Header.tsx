@@ -1,7 +1,18 @@
 import React from 'react';
-import { Monitor, Cpu, Shield, Code, Layers, Radio, MousePointer, Download } from 'lucide-react';
+import {
+  Monitor,
+  Cpu,
+  Shield,
+  Code,
+  Layers,
+  Radio,
+  MousePointer,
+  Download,
+  MonitorSmartphone,
+} from 'lucide-react';
 
 export type ActiveTab =
+  | 'devices'
   | 'host'
   | 'client'
   | 'downloads'
@@ -17,6 +28,12 @@ interface HeaderProps {
 
 export const Header: React.FC<HeaderProps> = ({ activeTab, setActiveTab }) => {
   const tabs = [
+    {
+      id: 'devices' as ActiveTab,
+      label: 'My Devices',
+      icon: MonitorSmartphone,
+      badge: '1-Click',
+    },
     {
       id: 'host' as ActiveTab,
       label: 'Host (Broadcaster)',

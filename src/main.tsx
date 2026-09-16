@@ -1,7 +1,9 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
-import { setEmbeddedSignalUrl } from './hooks/useWebRTC';
+import { getHostSignalUrl, setEmbeddedSignalUrl } from './hooks/useWebRTC';
+import { setBookOrigin } from './utils/deviceBook';
+import { setProfileOrigin } from './utils/machineProfile';
 import { isTauri, reportWebviewCapabilities, tauriGetSignalUrl } from './utils/tauriBridge';
 import { captureControlToken, isBrowserHostSession } from './utils/hostControl';
 import './index.css';
@@ -30,6 +32,13 @@ async function boot() {
     console.warn('[boot] embedded signaling server unavailable:', err);
     setEmbeddedSignalUrl(null);
   }
+
+  // The saved device book belongs to *this* machine's server, so the app window
+  // and the browser page it hands the session to share one list. A page served
+  // by some other machine gets browser storage instead — asking a remote host
+  // for its owner's devices would be both wrong and refused.
+  setBookOrigin(getHostSignalUrl());
+  setProfileOrigin(getHostSignalUrl());
 
   // Records in the host log whether this webview can capture the screen at all,
   // so a host that cannot share is diagnosable without reproducing it.

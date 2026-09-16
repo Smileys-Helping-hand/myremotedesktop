@@ -18,9 +18,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, Query, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
@@ -52,6 +52,12 @@ struct Room {
     /// AnyDesk-style plug-and-play: clients are admitted without prompting.
     unattended: bool,
     pin: Option<String>,
+    /// The person at the host answers every join, whatever the PIN says.
+    ///
+    /// A room with no PIN admits everyone by design, so "ask me each time"
+    /// cannot be expressed by leaving the PIN empty — it needs its own flag,
+    /// or choosing it would silently produce an open desk.
+    require_approval: bool,
 }
 
 struct PendingAuth {
@@ -276,7 +282,7 @@ impl SignalingHandle {
             .rooms
             .values()
             .map(|room| {
-                let gated = !room.unattended || room.pin.is_some();
+                let gated = room.require_approval || !room.unattended || room.pin.is_some();
                 DiscoveredHost {
                     desk_id: gated.then(|| room.room_id.clone()),
                     requires_pin: room.pin.is_some(),
@@ -373,6 +379,132 @@ async fn network_info(State(handle): State<SignalingHandle>) -> impl IntoRespons
 /// Answers a LAN discovery probe with the desks this machine is sharing.
 async fn hosts(State(handle): State<SignalingHandle>) -> impl IntoResponse {
     Json(json!({ "hosts": handle.discoverable_hosts() }))
+}
+
+/// Refuses a request that did not come from this machine.
+///
+/// The device book holds saved PINs and the network sweep makes this machine
+/// emit hundreds of connects. Both are the local operator's business, and the
+/// server listens on every interface so that clients can reach `/rtc` — so
+/// everything that is not part of a session checks who is asking. The Linux
+/// session UI runs in a browser on this same machine, over loopback, so it
+/// keeps working.
+fn local_only(peer: &SocketAddr) -> Option<axum::response::Response> {
+    use axum::http::StatusCode;
+
+    if peer.ip().is_loopback() {
+        return None;
+    }
+    Some(
+        (
+            StatusCode::FORBIDDEN,
+            "this endpoint is available on loopback only",
+        )
+            .into_response(),
+    )
+}
+
+/// This machine's identity and access settings.
+async fn get_profile(ConnectInfo(peer): ConnectInfo<SocketAddr>) -> axum::response::Response {
+    if let Some(refusal) = local_only(&peer) {
+        return refusal;
+    }
+    Json(crate::profile::current()).into_response()
+}
+
+/// Renames this machine, or changes how it admits clients.
+async fn set_profile(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(body): Json<Value>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+
+    if let Some(refusal) = local_only(&peer) {
+        return refusal;
+    }
+
+    let name = body
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let mode = match body.get("accessMode") {
+        Some(value) => match serde_json::from_value(value.clone()) {
+            Ok(mode) => Some(mode),
+            Err(_) => {
+                return (StatusCode::BAD_REQUEST, "unknown access mode").into_response();
+            }
+        },
+        None => None,
+    };
+    // Absent means "leave it alone"; null means "clear it".
+    let password = body
+        .get("accessPassword")
+        .map(|v| v.as_str().map(str::to_string));
+
+    match crate::profile::update(name, mode, password) {
+        Ok(profile) => Json(profile).into_response(),
+        Err(err) => (StatusCode::BAD_REQUEST, err).into_response(),
+    }
+}
+
+/// The operator's saved devices.
+async fn list_devices(ConnectInfo(peer): ConnectInfo<SocketAddr>) -> axum::response::Response {
+    if let Some(refusal) = local_only(&peer) {
+        return refusal;
+    }
+    Json(json!({ "devices": crate::devices::list() })).into_response()
+}
+
+/// Saves a device, or replaces the one already held under its id.
+async fn save_device(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(body): Json<Value>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+
+    if let Some(refusal) = local_only(&peer) {
+        return refusal;
+    }
+    let device = match crate::devices::device_from_json(&body) {
+        Ok(device) => device,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    match crate::devices::save(device) {
+        Ok(saved) => Json(json!({ "device": saved })).into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err).into_response(),
+    }
+}
+
+/// Forgets a device.
+async fn delete_device(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+
+    if let Some(refusal) = local_only(&peer) {
+        return refusal;
+    }
+    match crate::devices::remove(&id) {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err).into_response(),
+    }
+}
+
+/// Records a successful connection, which is what orders the list.
+async fn touch_device(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+
+    if let Some(refusal) = local_only(&peer) {
+        return refusal;
+    }
+    match crate::devices::touch(&id) {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err).into_response(),
+    }
 }
 
 /// Sweeps the local networks for other RemoteDesk hosts, for the local UI.
@@ -882,6 +1014,10 @@ fn host_create(handle: &SignalingHandle, peer_id: &str, data: &Value) {
         .and_then(Value::as_bool)
         .unwrap_or(true);
     let pin = normalize_pin(str_field(data, "pin"));
+    let require_approval = data
+        .get("requireApproval")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
 
     let mut hub = lock(handle);
 
@@ -912,6 +1048,7 @@ fn host_create(handle: &SignalingHandle, peer_id: &str, data: &Value) {
             clients,
             unattended,
             pin,
+            require_approval,
         },
     );
 
@@ -938,6 +1075,18 @@ fn pin_grants_entry(room_pin: Option<&str>, provided: Option<&str>) -> bool {
     }
 }
 
+/// Whether this join is admitted without troubling the person at the host.
+///
+/// Approval wins over everything else: a room that asks must ask, even when it
+/// has no PIN — and a room with no PIN admits everyone, so without this the
+/// "ask me each time" setting would quietly produce an open desk.
+fn admits_without_asking(room: &Room, provided: Option<&str>) -> bool {
+    if room.require_approval {
+        return false;
+    }
+    room.unattended || pin_grants_entry(room.pin.as_deref(), provided)
+}
+
 fn client_join(handle: &SignalingHandle, peer_id: &str, data: &Value) -> Verdict {
     let room_id = room_id_of(data);
     let pin = normalize_pin(str_field(data, "pin"));
@@ -961,11 +1110,10 @@ fn client_join(handle: &SignalingHandle, peer_id: &str, data: &Value) -> Verdict
         return Verdict::KeepAlive;
     };
 
-    let unattended = room.unattended;
     let host = room.host.clone();
-    let pin_matches = pin_grants_entry(room.pin.as_deref(), pin.as_deref());
+    let admitted = admits_without_asking(room, pin.as_deref());
 
-    if unattended || pin_matches {
+    if admitted {
         hub.failed_joins.remove(peer_id);
         if let Some(room) = hub.rooms.get_mut(&room_id) {
             room.clients.insert(peer_id.to_string());
@@ -1161,6 +1309,10 @@ fn router(handle: SignalingHandle) -> Router {
         .route("/network-info", get(network_info))
         .route("/hosts", get(hosts))
         .route("/discover", get(discover))
+        .route("/profile", get(get_profile).post(set_profile))
+        .route("/devices", get(list_devices).post(save_device))
+        .route("/devices/{id}", delete(delete_device))
+        .route("/devices/{id}/touch", post(touch_device))
         .route("/api/tunnel/start", post(start_tunnel))
         .route("/api/downloads", get(downloads))
         .route("/download/{file}", get(download_installer))
@@ -1254,6 +1406,7 @@ mod tests {
                 clients: HashSet::from([client.clone()]),
                 unattended: true,
                 pin: None,
+                require_approval: false,
             },
         );
         (hub, host, client)
@@ -1273,11 +1426,47 @@ mod tests {
                         clients: HashSet::new(),
                         unattended: *unattended,
                         pin: pin.map(|p| p.to_string()),
+                        require_approval: false,
                     },
                 );
             }
         }
         handle
+    }
+
+    fn room_with(unattended: bool, pin: Option<&str>, require_approval: bool) -> Room {
+        Room {
+            room_id: "903117".into(),
+            host: "host1".into(),
+            clients: HashSet::new(),
+            unattended,
+            pin: normalize_pin(pin),
+            require_approval,
+        }
+    }
+
+    #[test]
+    fn an_open_room_admits_anyone_and_a_password_room_admits_the_password() {
+        assert!(admits_without_asking(&room_with(true, None, false), None));
+        assert!(admits_without_asking(
+            &room_with(false, Some("HUNTER2"), false),
+            Some("HUNTER2")
+        ));
+        assert!(!admits_without_asking(
+            &room_with(false, Some("HUNTER2"), false),
+            Some("WRONG")
+        ));
+    }
+
+    #[test]
+    fn a_room_that_asks_admits_nobody_on_its_own() {
+        // Including with no PIN set, where the PIN rule alone would admit
+        // everyone — this is the setting that would silently be an open desk.
+        assert!(!admits_without_asking(&room_with(true, None, true), None));
+        assert!(!admits_without_asking(
+            &room_with(false, Some("HUNTER2"), true),
+            Some("HUNTER2")
+        ));
     }
 
     #[test]
