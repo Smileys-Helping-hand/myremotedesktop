@@ -12,6 +12,7 @@ mod platform;
 mod profile;
 mod signaling;
 mod tunnel;
+mod updates;
 
 use std::sync::Arc;
 use std::thread;
@@ -177,6 +178,112 @@ fn panic_revoke(app: AppHandle, state: State<'_, AppState>, reason: String) -> I
     status
 }
 
+/// An update found somewhere, described for the operator.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FoundUpdate {
+    pub version: String,
+    pub current_version: String,
+    pub notes: Option<String>,
+    pub published_at: Option<String>,
+    /// Where it came from, so the UI can say "from Linux laptop" rather than
+    /// leaving the operator to wonder what they are about to install.
+    pub source: String,
+}
+
+/// The update found by the last check, held until it is installed.
+///
+/// The handle carries the verified manifest entry and the URL to fetch, so the
+/// install does not re-resolve anything the check already decided.
+#[derive(Default)]
+pub struct PendingUpdate(std::sync::Mutex<Option<tauri_plugin_updater::Update>>);
+
+/// Asks one place whether it has a newer build.
+///
+/// `source` is the origin of a RemoteDesk machine on the network — its own
+/// server publishes a manifest for whatever installers it holds. With no
+/// source, the release endpoint compiled into the app is used instead. Both go
+/// through the same updater, so both are signature-verified against the key in
+/// this binary: a machine on the LAN can offer an update, but only a package
+/// signed with the project key will ever be applied.
+#[tauri::command]
+async fn check_for_update(
+    app: AppHandle,
+    pending: State<'_, PendingUpdate>,
+    source: Option<String>,
+) -> Result<Option<FoundUpdate>, String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let mut builder = app.updater_builder();
+    let label = match &source {
+        Some(origin) => {
+            let url = format!("{}/updates/latest.json", origin.trim_end_matches('/'));
+            let parsed = url.parse().map_err(|e| format!("{origin} is not a usable address: {e}"))?;
+            builder = builder
+                .endpoints(vec![parsed])
+                .map_err(|e| format!("could not use {origin} as an update source: {e}"))?;
+            origin.clone()
+        }
+        None => "the internet".to_string(),
+    };
+
+    let updater = builder.build().map_err(|e| e.to_string())?;
+    let found = updater.check().await.map_err(|e| e.to_string())?;
+
+    let mut slot = pending.0.lock().map_err(|_| "update state was poisoned")?;
+    match found {
+        Some(update) => {
+            let described = FoundUpdate {
+                version: update.version.clone(),
+                current_version: update.current_version.clone(),
+                notes: update.body.clone(),
+                published_at: update.date.map(|d| d.to_string()),
+                source: label,
+            };
+            *slot = Some(update);
+            Ok(Some(described))
+        }
+        None => {
+            *slot = None;
+            Ok(None)
+        }
+    }
+}
+
+/// Downloads and installs the update the last check found.
+///
+/// Progress is emitted as `update://progress` so the window can show a bar
+/// rather than a spinner that says nothing about an 80 MB download.
+#[tauri::command]
+async fn install_found_update(app: AppHandle, pending: State<'_, PendingUpdate>) -> Result<(), String> {
+    let update = {
+        let mut slot = pending.0.lock().map_err(|_| "update state was poisoned")?;
+        slot.take()
+    }
+    .ok_or("no update has been found yet — check for one first")?;
+
+    let progress_app = app.clone();
+    let mut downloaded: u64 = 0;
+
+    update
+        .download_and_install(
+            move |chunk, total| {
+                downloaded += chunk as u64;
+                let _ = progress_app.emit(
+                    "update://progress",
+                    serde_json::json!({ "downloaded": downloaded, "total": total }),
+                );
+            },
+            move || {
+                let _ = app.emit("update://progress", serde_json::json!({ "finished": true }));
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
 /// Whether this installation can replace itself, and if not, why not.
 ///
 /// The updater rewrites the installed application in place, which is only
@@ -194,6 +301,9 @@ pub struct UpdateCapability {
     /// Present only when `supported` is false; explains what to do instead.
     pub reason: Option<String>,
     pub current_version: String,
+    /// Where to drop packages this machine should offer to others. Naming it
+    /// is the difference between a feature and a secret.
+    pub library_dir: Option<String>,
 }
 
 #[tauri::command]
@@ -207,6 +317,7 @@ fn update_capability(app: AppHandle) -> UpdateCapability {
             install_kind: "dev".into(),
             reason: Some("This is a development build, so there is nothing to update.".into()),
             current_version,
+            library_dir: signaling::library_dir().map(|p| p.display().to_string()),
         };
     }
 
@@ -220,6 +331,7 @@ fn update_capability(app: AppHandle) -> UpdateCapability {
                 install_kind: "appimage".into(),
                 reason: None,
                 current_version,
+                library_dir: signaling::library_dir().map(|p| p.display().to_string()),
             };
         }
         UpdateCapability {
@@ -230,6 +342,7 @@ fn update_capability(app: AppHandle) -> UpdateCapability {
                     .into(),
             ),
             current_version,
+            library_dir: signaling::library_dir().map(|p| p.display().to_string()),
         }
     }
 
@@ -240,6 +353,7 @@ fn update_capability(app: AppHandle) -> UpdateCapability {
             install_kind: "nsis".into(),
             reason: None,
             current_version,
+            library_dir: signaling::library_dir().map(|p| p.display().to_string()),
         }
     }
 
@@ -250,6 +364,7 @@ fn update_capability(app: AppHandle) -> UpdateCapability {
             install_kind: "macos".into(),
             reason: None,
             current_version,
+            library_dir: signaling::library_dir().map(|p| p.display().to_string()),
         }
     }
 }
@@ -689,6 +804,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(AppState { input: Arc::clone(&input_state), signaling })
+        .manage(PendingUpdate::default())
         .setup({
             let input_state = Arc::clone(&input_state);
             move |app| {
@@ -699,6 +815,15 @@ pub fn run() {
                 // The device book has to be readable by the browser page too
                 // (the Linux session UI), so it is loaded here and served over
                 // the embedded server rather than kept in the webview.
+                // Where this machine keeps packages it can serve to others.
+                // An installed app cannot use the directory beside its binary:
+                // that is Program Files or /usr, and writing there needs rights
+                // the person running the app does not have.
+                match app.path().app_data_dir() {
+                    Ok(dir) => signaling::set_library_dir(dir.join("installers")),
+                    Err(err) => eprintln!("[remotedesk] no data directory for updates: {err}"),
+                }
+
                 match app.path().app_config_dir() {
                     Ok(dir) => {
                         devices::init(dir.join("devices.json"));
@@ -736,6 +861,8 @@ pub fn run() {
             system_diagnostics,
             firewall_status,
             update_capability,
+            check_for_update,
+            install_found_update,
             get_signal_url,
             open_session_in_browser,
             get_network_info,

@@ -21,6 +21,7 @@ import {
   type InstallerPlatform,
 } from '../utils/downloads';
 import { getUpdateCapability, type UpdateCapability } from '../utils/updater';
+import { UpdatePanel } from './UpdatePanel';
 
 function PlatformIcon({ platform }: { platform: InstallerPlatform }) {
   const className = 'w-5 h-5 text-cyan-400';
@@ -66,6 +67,10 @@ export const DownloadsView: React.FC = () => {
 
   return (
     <div className="space-y-6 max-w-5xl mx-auto">
+      {/* Updating in place comes first: it is what someone who already has the
+          app is here for, and it is the only path that needs no file handling. */}
+      <UpdatePanel />
+
       <div className="bg-[#0c0e18]/95 border border-cyan-500/25 rounded-2xl p-6 shadow-[0_8px_32px_rgba(0,0,0,0.5)] relative overflow-hidden">
         <div className="absolute -right-16 -top-16 w-64 h-64 bg-cyan-500/10 rounded-full blur-3xl pointer-events-none" />
         <div className="relative z-10 space-y-2">

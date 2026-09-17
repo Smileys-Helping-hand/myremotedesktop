@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { AlertCircle, ArrowUpCircle, CheckCircle2, Download, Loader2, X } from 'lucide-react';
 import {
-  checkForUpdate,
   compareVersions,
+  findUpdate,
   formatProgress,
   getUpdateCapability,
   installUpdate,
@@ -10,6 +10,7 @@ import {
   type DownloadProgress,
   type UpdateCapability,
 } from '../utils/updater';
+import { loadDevices } from '../utils/deviceBook';
 
 type Phase = 'idle' | 'available' | 'downloading' | 'installed' | 'failed';
 
@@ -42,7 +43,13 @@ export const UpdateBanner: React.FC = () => {
       if (!cap.supported) return;
 
       try {
-        const found = await checkForUpdate();
+        // Machines already in the device book are asked before the internet:
+        // on a pair that only ever sees each other, they are the only source
+        // there is. No network sweep here — a background check at launch must
+        // not cost hundreds of connections; the Updates panel does that when
+        // the operator asks for it.
+        const devices = await loadDevices();
+        const { update: found } = await findUpdate(devices.flatMap((d) => d.addresses));
         if (cancelled || !found) return;
 
         // The updater plugin already refuses to offer a downgrade, but this

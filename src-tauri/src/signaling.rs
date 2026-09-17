@@ -588,8 +588,38 @@ fn installers_dir() -> Option<std::path::PathBuf> {
     if let Some(dir) = std::env::var_os("REMOTEDESK_INSTALLERS_DIR") {
         return Some(std::path::PathBuf::from(dir));
     }
-    let exe = std::env::current_exe().ok()?;
-    Some(exe.parent()?.join("installers"))
+    // Next to the executable is where a portable copy or a build tree keeps
+    // them, and it wins when it exists.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent().map(|p| p.join("installers")) {
+            if dir.is_dir() {
+                return Some(dir);
+            }
+        }
+    }
+    // Otherwise the app's own data directory, which is writable by the person
+    // running it. An installed app lives under Program Files or /usr, where
+    // dropping a package beside the binary needs administrator rights — so a
+    // machine could never have been set up to share updates at all.
+    library_dir()
+}
+
+/// The writable package library, set once at startup by the app.
+static LIBRARY_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Names the directory this machine keeps sharable packages in.
+pub fn set_library_dir(dir: std::path::PathBuf) {
+    if let Err(err) = std::fs::create_dir_all(&dir) {
+        eprintln!("[remotedesk] could not create the package library at {dir:?}: {err}");
+        return;
+    }
+    println!("[remotedesk] sharing updates from {}", dir.display());
+    let _ = LIBRARY_DIR.set(dir);
+}
+
+/// Where this machine keeps packages it can hand to other machines.
+pub fn library_dir() -> Option<std::path::PathBuf> {
+    LIBRARY_DIR.get().cloned()
 }
 
 fn classify_installer(file: &str) -> (&'static str, &'static str) {
@@ -612,7 +642,7 @@ fn classify_installer(file: &str) -> (&'static str, &'static str) {
 }
 
 /// First `major.minor.patch` in a filename, however the bundler spelled the rest.
-fn version_from_filename(file: &str) -> Option<String> {
+pub fn version_from_filename(file: &str) -> Option<String> {
     let bytes: Vec<char> = file.chars().collect();
     let mut i = 0;
     while i < bytes.len() {
@@ -684,6 +714,38 @@ async fn downloads() -> impl IntoResponse {
         "assets": assets,
         "releasesUrl": RELEASES_URL,
     }))
+}
+
+/// The update manifest for whatever this machine has to hand out.
+///
+/// Answers any caller, unlike the device book or the network sweep: a peer
+/// fetching this *is* the point, and there is nothing secret in it — the URLs
+/// it names are the same files `/api/downloads` already lists. The packages
+/// behind it are signed, so a machine that serves a manifest still cannot make
+/// another machine install anything it did not sign.
+///
+/// The base URL is taken from the `Host` header the caller used, so the
+/// download URLs come back on the address that machine can actually reach —
+/// this server has several, and guessing the wrong one yields a manifest whose
+/// links time out.
+async fn update_manifest(headers: axum::http::HeaderMap) -> axum::response::Response {
+    use axum::http::StatusCode;
+
+    let Some(dir) = installers_dir() else {
+        return (StatusCode::NOT_FOUND, "no installer directory").into_response();
+    };
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("127.0.0.1");
+    let base = format!("http://{host}");
+
+    match crate::updates::build_manifest(&base, &crate::updates::packages_in(&dir), None) {
+        Some(manifest) => Json(manifest).into_response(),
+        // 204 is what the updater reads as "nothing published here", as opposed
+        // to an error it would report to the operator as a failed check.
+        None => StatusCode::NO_CONTENT.into_response(),
+    }
 }
 
 /// Serves one installer file.
@@ -1315,6 +1377,7 @@ fn router(handle: SignalingHandle) -> Router {
         .route("/devices/{id}/touch", post(touch_device))
         .route("/api/tunnel/start", post(start_tunnel))
         .route("/api/downloads", get(downloads))
+        .route("/updates/latest.json", get(update_manifest))
         .route("/download/{file}", get(download_installer))
         .route("/rtc", get(ws_upgrade))
         .route("/control", get(control_upgrade))

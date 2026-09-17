@@ -90,7 +90,7 @@ pub fn init(path: PathBuf) {
 
 fn load(path: &Path) -> io::Result<Book> {
     match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
+        Ok(bytes) => serde_json::from_slice(strip_bom(&bytes))
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err)),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Book::default()),
         Err(err) => Err(err),
@@ -266,6 +266,16 @@ pub fn device_from_json(value: &serde_json::Value) -> Result<Device, String> {
     })
 }
 
+/// Drops a UTF-8 byte-order mark, which JSON does not allow.
+///
+/// Anything that opens one of these files in a Windows editor — Notepad,
+/// `Set-Content`, PowerShell's `>` — writes one. Without this the file parses
+/// as invalid and the contents read as empty, which looks exactly like losing
+/// everything that was saved.
+fn strip_bom(bytes: &[u8]) -> &[u8] {
+    bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,6 +352,25 @@ mod tests {
         assert_eq!(read.devices.len(), 1);
         assert_eq!(read.devices[0].pin.as_deref(), Some("TEST12"));
         assert_eq!(read.devices[0].desk_id, "903117");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_written_by_a_windows_editor_still_loads() {
+        // PowerShell's Set-Content -Encoding utf8 writes a byte-order mark, and
+        // JSON has no place for one: without stripping it, every saved device
+        // silently disappears.
+        let dir = std::env::temp_dir().join(format!("remotedesk-bom-{}", std::process::id()));
+        let path = dir.join("devices.json");
+        fs::create_dir_all(&dir).unwrap();
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(br#"{"devices":[{"id":"one","name":"Laptop"}]}"#);
+        fs::write(&path, bytes).unwrap();
+
+        let book = load(&path).unwrap();
+        assert_eq!(book.devices.len(), 1);
+        assert_eq!(book.devices[0].name, "Laptop");
 
         let _ = fs::remove_dir_all(&dir);
     }

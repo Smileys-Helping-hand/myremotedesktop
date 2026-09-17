@@ -50,7 +50,7 @@ export const Header: React.FC<HeaderProps> = ({ activeTab, setActiveTab }) => {
       id: 'downloads' as ActiveTab,
       label: 'Get the App',
       icon: Download,
-      badge: 'Installers',
+      badge: 'Update',
     },
     {
       id: 'sandbox' as ActiveTab,

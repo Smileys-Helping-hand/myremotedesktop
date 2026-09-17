@@ -100,7 +100,7 @@ pub fn init(path: PathBuf) {
 
 fn load(path: &Path) -> io::Result<Option<Profile>> {
     match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
+        Ok(bytes) => serde_json::from_slice(strip_bom(&bytes))
             .map(Some)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err)),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -218,6 +218,16 @@ fn machine_name() -> String {
         }
     }
     "RemoteDesk host".into()
+}
+
+/// Drops a UTF-8 byte-order mark, which JSON does not allow.
+///
+/// Anything that opens one of these files in a Windows editor — Notepad,
+/// `Set-Content`, PowerShell's `>` — writes one. Without this the file parses
+/// as invalid and the contents read as empty, which looks exactly like losing
+/// everything that was saved.
+fn strip_bom(bytes: &[u8]) -> &[u8] {
+    bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes)
 }
 
 #[cfg(test)]

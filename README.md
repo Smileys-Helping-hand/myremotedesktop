@@ -149,18 +149,33 @@ session — see *Input backends* above.
 
 ## Connecting two machines
 
-On the **host**:
+Each installation has a **Desk ID** that never changes, a name, and a rule for who may
+connect. They live in the app's config directory, not in the page, so the ID you give someone
+keeps working after a restart.
 
-1. Open RemoteDesk and stay on the **Host** tab.
-2. Click **Start Real Screen Share** and pick the display to share.
-3. Note the 6-digit **Desk ID**, and the `http://<ip>:4000` address shown under it.
+### The short way: save the machine once
 
-On the **client**:
+On the machine you want to reach, open **Host**, choose **Saved password** under *Who can
+connect*, type a password, and press **Save**. Then press **Copy Link**.
 
-1. Open RemoteDesk and switch to the **Client** tab. *(On Linux the UI opens in your browser —
-   that is expected; see *Linux: how it runs*.)*
-2. Put the host's `http://<ip>:4000` address in the server field.
-3. Enter the Desk ID and click **Connect**.
+On the other machine, open **My Devices**, paste that link, and press **Add** then **Save
+Device**. From then on it is one click — or a double-click on the card.
+
+The link carries every address the host knows, LAN first and a public tunnel last, so the same
+saved device works from either side of the internet: connecting tries each in turn.
+
+If you would rather not paste anything, **Find On My Network** sweeps this network and lists
+the machines running RemoteDesk, with a **Save As Device** button on each.
+
+### The long way, by hand
+
+On the **host**: open the **Host** tab, click **Start Real Screen Share**, pick the display or
+window to share, and read off the 6-digit **Desk ID** and the `http://<ip>:4000` address under
+it.
+
+On the **client**: switch to the **Client** tab *(on Linux the UI opens in your browser — that
+is expected; see *Linux: how it runs*)*, put the host's address in the server field, enter the
+Desk ID, and click **Connect**.
 
 Both machines must be able to reach that address. On the same LAN they can. Across the
 internet, see *Connecting across networks* below.
@@ -173,10 +188,17 @@ internet, see *Connecting across networks* below.
 
 ### Access control
 
-- **Unattended access** (default) admits any client that knows the Desk ID — convenient for
-  your own machines, and the setting to turn off for anything else.
-- With unattended access off, a **rotating PIN** is required, and a client whose PIN does not
-  match has to be approved by the operator at the host.
+*Who can connect*, on the Host tab, is one of four:
+
+- **Ask me first** (default) — nobody gets in until someone at the host presses **Allow** on
+  the prompt. Note that this is a flag on the room, not an empty PIN: a room with no PIN admits
+  everyone, so "ask" had to be made explicit.
+- **Saved password** — a fixed password admits a client with no prompt. This is what the other
+  machine saves, and what makes reconnecting one click. A client with the wrong password still
+  raises the prompt.
+- **Rotating PIN** — a PIN that changes every minute, read off the host's screen. Good for a
+  one-off; useless for saving, by design.
+- **Anyone with ID** — no secret at all. Trusted networks only.
 - Remote input is refused entirely until the host grants control, and it is suspended for
   2.5 seconds whenever someone physically moves the mouse at the host — so the person sitting
   at the machine always wins.
@@ -286,6 +308,41 @@ npm run check:signaling # signaling protocol conformance against a running serve
 ```
 
 ---
+
+## Updating
+
+**In the app:** *Get the App* → **Check for updates** → **Download and install**. The app
+fetches the package, verifies it, replaces itself and restarts. There is nothing to download by
+hand and nothing to uninstall first.
+
+It asks three kinds of place, nearest first:
+
+1. **Machines in My Devices** — every saved address.
+2. **Machines on this network** — anything answering a sweep.
+3. **The release endpoint** compiled into the app.
+
+The first two are what make a pair of machines with no internet able to keep each other
+current. Any machine running RemoteDesk publishes `/updates/latest.json` describing whatever
+packages sit in its library folder, and serves them over the same HTTP server the session uses.
+The Updates panel names that folder: drop the Windows `.exe` and the Linux `.AppImage` (each
+with its `.sig`) in there and the other machine can update from this one.
+
+Peer manifests are fetched over plain HTTP — machines on a LAN have no
+certificates — which the updater refuses by default, so `dangerousInsecureTransportProtocol`
+is enabled in `src-tauri/tauri.conf.json`. Read that flag precisely: it affects the *transport*,
+not the verification. A machine on your network that intercepted the manifest could withhold an
+update or point at a different package, but a package that is not signed with the project key is
+refused, and the updater only ever moves to a higher version — so the worst available attack is
+to delay an update, not to install anything. The release endpoint remains `https`.
+
+**Serving an update does not mean being trusted to supply one.** Every package is verified
+against the signing key compiled into the running binary before anything is written, so a
+machine on your network can offer an update but cannot forge one. A package without a matching
+`.sig` is skipped when the manifest is built rather than offered and refused after the
+download.
+
+Two things cannot update in place, and say so instead of showing a button that would fail: a
+`.deb` or `.rpm`, which the system package manager owns, and a development build.
 
 ## Releasing
 

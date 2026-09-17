@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { compareVersions, formatProgress } from './updater';
+import {
+  compareVersions,
+  findUpdate,
+  formatProgress,
+  type AvailableUpdate,
+} from './updater';
 
 describe('compareVersions', () => {
   it('orders by major, then minor, then patch', () => {
@@ -48,5 +53,70 @@ describe('formatProgress', () => {
       percent: 33.3333,
     });
     expect(text).toContain('(33%)');
+  });
+});
+
+describe('findUpdate', () => {
+  const update = (version: string, source: string): AvailableUpdate => ({
+    version,
+    currentVersion: '1.1.3',
+    notes: null,
+    publishedAt: null,
+    source,
+  });
+
+  it('stops at the first source that has something newer', async () => {
+    // Nearest first: a machine on this network is faster than the internet and
+    // is the only source at all when the connection is down.
+    const asked: Array<string | null> = [];
+    const { update: found, checked } = await findUpdate(
+      ['http://192.168.1.5:4000', 'http://192.168.1.9:4000'],
+      true,
+      async (source) => {
+        asked.push(source);
+        return source === 'http://192.168.1.5:4000' ? update('1.1.4', source) : null;
+      }
+    );
+
+    expect(found?.version).toBe('1.1.4');
+    expect(asked).toEqual(['http://192.168.1.5:4000']);
+    expect(checked).toEqual(['http://192.168.1.5:4000']);
+  });
+
+  it('asks the internet last, and only when the network had nothing', async () => {
+    const asked: Array<string | null> = [];
+    const { update: found } = await findUpdate(['http://192.168.1.5:4000'], true, async (source) => {
+      asked.push(source);
+      return source === null ? update('1.1.4', 'the internet') : null;
+    });
+
+    expect(asked).toEqual(['http://192.168.1.5:4000', null]);
+    expect(found?.source).toBe('the internet');
+  });
+
+  it('keeps going when a source is unreachable', async () => {
+    // One machine that is asleep must not end the search — that is the normal
+    // state of half the devices in the book.
+    const { update: found, failures } = await findUpdate(
+      ['http://192.168.1.5:4000', 'http://192.168.1.9:4000'],
+      false,
+      async (source) => {
+        if (source === 'http://192.168.1.5:4000') throw new Error('ECONNREFUSED');
+        return update('1.1.4', String(source));
+      }
+    );
+
+    expect(found?.version).toBe('1.1.4');
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toContain('192.168.1.5');
+  });
+
+  it('reports nothing found rather than throwing when every source fails', async () => {
+    const { update: found, failures, checked } = await findUpdate(['http://a:4000'], false, async () => {
+      throw new Error('nope');
+    });
+    expect(found).toBeNull();
+    expect(checked).toEqual([]);
+    expect(failures).toHaveLength(1);
   });
 });
