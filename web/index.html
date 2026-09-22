@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RemoteDesk — see and control your other computer</title>
+    <meta
+      name="description"
+      content="Install RemoteDesk on two computers and connect to either one from the other. Free, works on Windows and Linux."
+    />
+    <link rel="icon" href="/app/icon.svg" type="image/svg+xml" />
+    <style>
+      :root {
+        --ink: #e7ecf5;
+        --dim: #93a1b8;
+        --bg: #05070e;
+        --card: #0c0e18;
+        --edge: rgba(6, 182, 212, 0.22);
+        --cyan: #22d3ee;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      .wrap { max-width: 880px; margin: 0 auto; padding: 0 20px; }
+      header { padding: 56px 0 8px; text-align: center; }
+      .logo {
+        width: 64px; height: 64px; margin: 0 auto 18px; border-radius: 18px;
+        background: linear-gradient(135deg, #22d3ee, #2563eb 60%, #4f46e5);
+        display: grid; place-items: center; font-size: 30px;
+        box-shadow: 0 10px 40px rgba(34, 211, 238, 0.25);
+      }
+      h1 { font-size: clamp(30px, 6vw, 44px); line-height: 1.15; margin: 0 0 12px; letter-spacing: -0.02em; }
+      .lede { font-size: clamp(17px, 2.4vw, 20px); color: var(--dim); margin: 0 auto 8px; max-width: 34ch; }
+
+      .downloads { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); margin: 36px 0 10px; }
+      .dl {
+        display: block; text-decoration: none; color: inherit; background: var(--card);
+        border: 1px solid var(--edge); border-radius: 18px; padding: 20px 22px; transition: border-color .15s, transform .15s;
+      }
+      .dl:hover { border-color: rgba(34, 211, 238, 0.6); transform: translateY(-2px); }
+      .dl .os { font-size: 19px; font-weight: 700; margin-bottom: 2px; }
+      .dl .meta { color: var(--dim); font-size: 13.5px; }
+      .dl.primary { background: linear-gradient(135deg, rgba(34,211,238,.16), rgba(37,99,235,.16)); border-color: rgba(34,211,238,.5); }
+
+      .steps { counter-reset: step; display: grid; gap: 14px; margin: 14px 0 0; padding: 0; list-style: none; }
+      .steps li {
+        background: var(--card); border: 1px solid rgba(255,255,255,.06); border-radius: 16px;
+        padding: 18px 20px 18px 62px; position: relative;
+      }
+      .steps li::before {
+        counter-increment: step; content: counter(step);
+        position: absolute; left: 20px; top: 17px; width: 28px; height: 28px; border-radius: 9px;
+        background: rgba(34,211,238,.15); border: 1px solid var(--edge); color: var(--cyan);
+        display: grid; place-items: center; font-weight: 700; font-size: 14px;
+      }
+      .steps b { display: block; margin-bottom: 2px; }
+      .steps span { color: var(--dim); font-size: 14.5px; }
+
+      h2 { font-size: 24px; margin: 46px 0 14px; letter-spacing: -0.01em; }
+      .row { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+      .note { background: var(--card); border: 1px solid rgba(255,255,255,.06); border-radius: 16px; padding: 18px 20px; }
+      .note b { display: block; margin-bottom: 4px; }
+      .note p { margin: 0; color: var(--dim); font-size: 14.5px; }
+
+      .web-app { display: inline-block; margin-top: 10px; padding: 13px 22px; border-radius: 14px;
+        background: rgba(34,211,238,.12); border: 1px solid var(--edge); color: var(--cyan);
+        text-decoration: none; font-weight: 700; }
+      .web-app:hover { background: rgba(34,211,238,.2); }
+
+      footer { color: var(--dim); font-size: 13px; text-align: center; padding: 54px 0 40px; }
+      code { background: rgba(255,255,255,.06); padding: 1px 6px; border-radius: 6px; font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <div class="logo">🖥️</div>
+        <h1>See and control your other computer</h1>
+        <p class="lede">
+          Install RemoteDesk on both computers. Open it, and they find each other — one click to
+          connect.
+        </p>
+      </header>
+
+      <div class="downloads">
+        <a class="dl primary" id="pick" href="/downloads/RemoteDesk_1.1.4_x64-setup.exe" download>
+          <div class="os">Download for Windows</div>
+          <div class="meta">Version 1.1.4 · 3 MB · Windows 10 and 11</div>
+        </a>
+        <a class="dl" href="/downloads/RemoteDesk_1.1.4_amd64.AppImage" download>
+          <div class="os">Download for Linux</div>
+          <div class="meta">AppImage · 82 MB · runs on any distribution</div>
+        </a>
+      </div>
+
+      <div class="row" style="margin-top: 4px">
+        <a class="dl" href="/downloads/RemoteDesk_1.1.4_amd64.deb" download>
+          <div class="os">Linux · .deb</div>
+          <div class="meta">Ubuntu, Debian, Mint · 5 MB</div>
+        </a>
+        <a class="dl" href="/downloads/RemoteDesk-1.1.4-1.x86_64.rpm" download>
+          <div class="os">Linux · .rpm</div>
+          <div class="meta">Fedora, openSUSE · 5 MB</div>
+        </a>
+      </div>
+
+      <h2>How it works</h2>
+      <ol class="steps">
+        <li>
+          <b>Install it on both computers</b>
+          <span>Download above, open the file, follow the installer. Nothing to sign up for.</span>
+        </li>
+        <li>
+          <b>Open RemoteDesk on both</b>
+          <span
+            >Each one lists the other under <em>My Devices</em>, by name, as soon as they are on the
+            same Wi-Fi.</span
+          >
+        </li>
+        <li>
+          <b>Press Join, then Allow</b>
+          <span
+            >Press <em>Join</em> on the computer you are sitting at. On the other one press
+            <em>Allow and share my screen</em>. That is the whole thing.</span
+          >
+        </li>
+      </ol>
+
+      <h2>No computer to install on?</h2>
+      <p style="color: var(--dim); margin: 0">
+        Open the web version in a browser instead. It can see and control a computer that is running
+        the app — it just cannot share <em>its own</em> screen.
+      </p>
+      <a class="web-app" href="/app/">Open the web version</a>
+
+      <h2>Good to know</h2>
+      <div class="row">
+        <div class="note">
+          <b>Nobody gets in without you</b>
+          <p>
+            Out of the box, a connection has to be allowed on the computer being connected to. You
+            can set a password instead, so your own machines connect without asking.
+          </p>
+        </div>
+        <div class="note">
+          <b>It updates itself</b>
+          <p>
+            Open <em>Get the App</em> and press <em>Check for updates</em>. Computers on the same
+            network can even update each other, with no internet.
+          </p>
+        </div>
+        <div class="note">
+          <b>Your screen goes straight there</b>
+          <p>
+            The picture travels directly between the two computers over WebRTC. It is not stored or
+            relayed through a server of ours.
+          </p>
+        </div>
+        <div class="note">
+          <b>Away from home</b>
+          <p>
+            On the same Wi-Fi it just works. To connect from elsewhere, press
+            <em>Generate Public URL</em> on the computer being shared and use the link it gives you.
+          </p>
+        </div>
+      </div>
+
+      <footer>
+        RemoteDesk 1.1.4 · Windows and Linux · <code>WebRTC + Tauri + Rust</code>
+      </footer>
+    </div>
+
+    <script>
+      // Put the visitor's own platform first. A download page that offers a
+      // choice before it offers the obvious answer is a page that asks a
+      // non-technical person a question they should not have to answer.
+      (function () {
+        var ua = navigator.userAgent;
+        var pick = document.getElementById('pick');
+        if (/Linux/i.test(ua) && !/Android/i.test(ua)) {
+          pick.setAttribute('href', '/downloads/RemoteDesk_1.1.4_amd64.AppImage');
+          pick.querySelector('.os').textContent = 'Download for Linux';
+          pick.querySelector('.meta').textContent =
+            'AppImage · 82 MB · runs on any distribution';
+        }
+      })();
+    </script>
+  </body>
+</html>
