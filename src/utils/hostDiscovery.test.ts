@@ -26,9 +26,19 @@ describe('parseLanAddress', () => {
 describe('candidateOrigins', () => {
   it('sweeps the whole /24 of each address this machine holds', () => {
     const origins = candidateOrigins(['http://192.168.1.23:4000']);
-    expect(origins).toHaveLength(253); // .1 to .254, minus ourselves
     expect(origins).toContain('http://192.168.1.1:4000');
     expect(origins).toContain('http://192.168.1.254:4000');
+    // .1 to .254 on the default port and the one above it, minus ourselves.
+    expect(origins).toHaveLength(253 + 254);
+  });
+
+  it('looks on the default port even when this machine had to move off it', () => {
+    // The failure this prevents: something unrelated holds 4000 here, so we
+    // settled for 4001 — and then searched the network for peers on 4001 while
+    // every one of them sat on 4000.
+    const origins = candidateOrigins(['http://192.168.1.23:4001']);
+    expect(origins).toContain('http://192.168.1.206:4000');
+    expect(origins).toContain('http://192.168.1.206:4001');
   });
 
   it('never probes this machine', () => {
@@ -154,7 +164,7 @@ describe('scanForHosts', () => {
 
     expect(result.hosts.map((h) => h.origin)).toEqual(['http://192.168.1.77:4000']);
     expect(result.networks).toEqual(['192.168.1.x']);
-    expect(result.scanned).toBe(253);
+    expect(result.scanned).toBe(253 + 254);
   });
 
   it('puts servers that are actually sharing first', async () => {

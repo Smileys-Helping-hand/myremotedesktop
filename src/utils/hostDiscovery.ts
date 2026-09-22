@@ -68,6 +68,8 @@ const DEFAULT_CONCURRENCY = 64;
 const NATIVE_SCAN_TIMEOUT_MS = 45_000;
 /** Last usable host in a /24, and the count of addresses swept per network. */
 const SUBNET_HOSTS = 254;
+/** Where RemoteDesk starts looking for a free port, and so where a host most likely is. */
+const DEFAULT_PORT = 4000;
 
 const IPV4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
 
@@ -109,10 +111,18 @@ export function candidateOrigins(lanAddresses: string[]): string[] {
 
   const origins: string[] = [];
   for (const { prefix, port } of networks) {
+    // Every machine that could not get 4000 walked up from it, so searching
+    // only the port *we* ended up with finds nobody: a machine on 4001 would
+    // sweep the network for peers on 4001 while they all sat on 4000.
+    const ports = [DEFAULT_PORT, DEFAULT_PORT + 1];
+    if (!ports.includes(port)) ports.push(port);
+
     for (let last = 1; last <= SUBNET_HOSTS; last++) {
       const ip = `${prefix}${last}`;
-      if (own.has(`${ip}:${port}`)) continue;
-      origins.push(`http://${ip}:${port}`);
+      for (const candidate of ports) {
+        if (own.has(`${ip}:${candidate}`)) continue;
+        origins.push(`http://${ip}:${candidate}`);
+      }
     }
   }
   return origins;

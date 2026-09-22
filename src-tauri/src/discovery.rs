@@ -73,7 +73,7 @@ pub struct DiscoveryReport {
 /// Probing our own address would find our own server, which is not a discovery
 /// — reporting it as one is worse than finding nothing, because it looks like
 /// success and connects to a machine that is not sharing anything.
-fn candidates(port: u16, own: &[Ipv4Addr]) -> (Vec<SocketAddr>, Vec<String>) {
+fn candidates(ports: &[u16], own: &[Ipv4Addr]) -> (Vec<SocketAddr>, Vec<String>) {
     let mine: BTreeSet<Ipv4Addr> = own.iter().copied().collect();
     let mut prefixes: Vec<[u8; 3]> = Vec::new();
     for ip in own {
@@ -94,11 +94,34 @@ fn candidates(port: u16, own: &[Ipv4Addr]) -> (Vec<SocketAddr>, Vec<String>) {
             if mine.contains(&ip) {
                 continue;
             }
-            addresses.push(SocketAddr::from((ip, port)));
+            for port in ports {
+                addresses.push(SocketAddr::from((ip, *port)));
+            }
         }
     }
     (addresses, networks)
 }
+
+/// Ports to look on, given the one this machine ended up with.
+///
+/// Probing only our own port was a real and invisible failure: RemoteDesk walks
+/// up from 4000 when a port is taken, so a machine that had to settle for 4001
+/// — because something unrelated held 4000 — searched the whole network for
+/// other machines on 4001 and found none, while they sat on 4000 answering
+/// anyone who asked. The default is always searched, and so is ours; the extra
+/// port costs one more connect per address and buys the case where both
+/// machines had to move.
+fn ports_to_probe(own_port: u16) -> Vec<u16> {
+    let mut ports = vec![DEFAULT_PROBE_PORT, DEFAULT_PROBE_PORT + 1];
+    if !ports.contains(&own_port) {
+        ports.push(own_port);
+    }
+    ports
+}
+
+/// Where RemoteDesk starts looking for a free port, and so where a host most
+/// likely is. Mirrors `DEFAULT_PORT` in `signaling.rs`.
+const DEFAULT_PROBE_PORT: u16 = 4000;
 
 /// Reads a JSON body out of a raw HTTP/1.x response.
 ///
@@ -222,7 +245,7 @@ async fn probe(addr: SocketAddr) -> Option<FoundHost> {
 /// Hosts that are actually sharing sort first: that is what the operator is
 /// looking for, and a machine merely running the app is noise beside it.
 pub async fn scan(port: u16, own: Vec<Ipv4Addr>) -> DiscoveryReport {
-    let (addresses, networks) = candidates(port, &own);
+    let (addresses, networks) = candidates(&ports_to_probe(port), &own);
     let scanned = addresses.len();
 
     let permits = Arc::new(Semaphore::new(CONCURRENCY));
@@ -257,7 +280,7 @@ mod tests {
     #[test]
     fn candidates_cover_the_whole_subnet_of_every_address_held() {
         let (addresses, networks) = candidates(
-            4000,
+            &[4000],
             &[Ipv4Addr::new(192, 168, 1, 23), Ipv4Addr::new(10, 0, 0, 7)],
         );
         assert_eq!(networks, vec!["192.168.1.x", "10.0.0.x"]);
@@ -271,14 +294,14 @@ mod tests {
     fn candidates_never_include_this_machine() {
         // Our own server always answers, so probing ourselves would report a
         // discovery on every scan while the real host stayed unfound.
-        let (addresses, _) = candidates(4000, &[Ipv4Addr::new(192, 168, 1, 23)]);
+        let (addresses, _) = candidates(&[4000], &[Ipv4Addr::new(192, 168, 1, 23)]);
         assert!(!addresses.contains(&SocketAddr::from(([192, 168, 1, 23], 4000))));
     }
 
     #[test]
     fn candidates_collapse_two_addresses_on_one_network() {
         let (addresses, networks) = candidates(
-            4000,
+            &[4000],
             &[Ipv4Addr::new(192, 168, 1, 23), Ipv4Addr::new(192, 168, 1, 90)],
         );
         assert_eq!(networks, vec!["192.168.1.x"]);
@@ -286,8 +309,22 @@ mod tests {
     }
 
     #[test]
+    fn a_machine_pushed_off_the_default_port_still_looks_on_it() {
+        // The failure this prevents: this machine settled for 4001 because
+        // something else held 4000, then searched the network for peers on
+        // 4001 only — and every peer was on 4000, answering nobody.
+        assert_eq!(ports_to_probe(4001), vec![4000, 4001]);
+        assert_eq!(ports_to_probe(4000), vec![4000, 4001]);
+        assert_eq!(ports_to_probe(4007), vec![4000, 4001, 4007]);
+
+        let (addresses, _) = candidates(&ports_to_probe(4007), &[Ipv4Addr::new(192, 168, 1, 23)]);
+        assert!(addresses.contains(&SocketAddr::from(([192, 168, 1, 206], 4000))));
+        assert!(addresses.contains(&SocketAddr::from(([192, 168, 1, 206], 4007))));
+    }
+
+    #[test]
     fn candidates_are_empty_without_a_local_address() {
-        let (addresses, networks) = candidates(4000, &[]);
+        let (addresses, networks) = candidates(&[4000], &[]);
         assert!(addresses.is_empty());
         assert!(networks.is_empty());
     }
