@@ -178,6 +178,77 @@ fn panic_revoke(app: AppHandle, state: State<'_, AppState>, reason: String) -> I
     status
 }
 
+/// A one-shot update asked for on the command line.
+///
+/// `--update-check [origin]` reports what is available; `--update-install
+/// [origin]` applies it. Both exist because a machine that is only ever reached
+/// remotely may have nobody in front of its window — and because the update
+/// path is otherwise only reachable through the UI, which makes it impossible
+/// to exercise without a person clicking.
+///
+/// `origin` is another RemoteDesk machine; omitted, the release endpoint
+/// compiled into the app is used.
+fn update_cli_request() -> Option<(bool, Option<String>)> {
+    let args: Vec<String> = std::env::args().collect();
+    let index = args
+        .iter()
+        .position(|a| a == "--update-check" || a == "--update-install")?;
+    let install = args[index] == "--update-install";
+    // The next argument is the source, unless it is another flag.
+    let source = args
+        .get(index + 1)
+        .filter(|a| !a.starts_with("--"))
+        .cloned();
+    Some((install, source))
+}
+
+/// Runs the command-line update and ends the process with its verdict.
+///
+/// Exit codes are what a script reads: 0 for "did what you asked", 1 for a
+/// failure, 2 for "nothing to update", so `--update-check` can gate an install
+/// in a shell without parsing text.
+fn run_update_cli(app: AppHandle, install: bool, source: Option<String>) {
+    tauri::async_runtime::spawn(async move {
+        let pending = app.state::<PendingUpdate>();
+        let found = match check_for_update(app.clone(), pending.clone(), source).await {
+            Ok(found) => found,
+            Err(err) => {
+                eprintln!("[remotedesk] update check failed: {err}");
+                app.exit(1);
+                return;
+            }
+        };
+
+        let Some(found) = found else {
+            println!("[remotedesk] up to date");
+            app.exit(2);
+            return;
+        };
+
+        println!(
+            "[remotedesk] {} is available (this machine has {}), from {}",
+            found.version, found.current_version, found.source
+        );
+
+        if !install {
+            app.exit(0);
+            return;
+        }
+
+        println!("[remotedesk] downloading and installing…");
+        match install_found_update(app.clone(), app.state::<PendingUpdate>()).await {
+            Ok(()) => {
+                println!("[remotedesk] installed {}", found.version);
+                app.exit(0);
+            }
+            Err(err) => {
+                eprintln!("[remotedesk] install failed: {err}");
+                app.exit(1);
+            }
+        }
+    });
+}
+
 /// An update found somewhere, described for the operator.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -839,6 +910,13 @@ pub fn run() {
 
                 #[cfg(target_os = "linux")]
                 enable_linux_media_capture(app.handle());
+
+                // Asked to update from the command line: do that and nothing
+                // else, so a script gets one answer and an exit code.
+                if let Some((install, source)) = update_cli_request() {
+                    run_update_cli(app.handle().clone(), install, source);
+                    return Ok(());
+                }
 
                 spawn_kill_switch_watcher(app.handle().clone(), Arc::clone(&input_state));
 

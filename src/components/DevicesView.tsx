@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Check,
   Link2,
@@ -20,7 +20,13 @@ import {
   saveDevice,
   sortDevices,
 } from '../utils/deviceBook';
-import { DiscoveredHost, autofillDeskId, isSharing, scanForHosts } from '../utils/hostDiscovery';
+import {
+  DiscoveredHost,
+  autofillDeskId,
+  hostLabel,
+  isSharing,
+  scanForHosts,
+} from '../utils/hostDiscovery';
 import { getHostSignalUrl } from '../hooks/useWebRTC';
 import { useToast } from './ToastSystem';
 
@@ -36,6 +42,9 @@ interface DevicesViewProps {
   /** Starts a session with this device, in the client tab. */
   onConnect: (target: ConnectTarget) => void;
 }
+
+/** How often the open tab looks around again. */
+const NEARBY_REFRESH_MS = 20000;
 
 /** A blank device, for the add form. */
 const emptyDraft = (): SavedDevice => ({
@@ -72,6 +81,8 @@ export const DevicesView: React.FC<DevicesViewProps> = ({ onConnect }) => {
   const [linkText, setLinkText] = useState('');
 
   const [scanning, setScanning] = useState(false);
+  /** Guards against a background sweep and a pressed button overlapping. */
+  const scanningRef = useRef(false);
   const [found, setFound] = useState<DiscoveredHost[]>([]);
   const [scanNote, setScanNote] = useState<string | null>(null);
 
@@ -83,6 +94,30 @@ export const DevicesView: React.FC<DevicesViewProps> = ({ onConnect }) => {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  /**
+   * Look around as soon as this tab opens, and keep looking.
+   *
+   * The machines on a home network are the ones being connected to, and
+   * expecting someone to press a button before the app will even look for them
+   * is the difference between "my devices are here" and "my devices are here
+   * if I ask". A sweep costs about two seconds in the app, so it is repeated
+   * while the tab is open rather than left to go stale.
+   */
+  useEffect(() => {
+    let cancelled = false;
+    const look = async () => {
+      if (cancelled) return;
+      await runScan(true);
+    };
+    void look();
+    const timer = setInterval(look, NEARBY_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /** Addresses already saved, so a scan can mark what is new. */
   const savedAddresses = useMemo(
@@ -163,43 +198,85 @@ export const DevicesView: React.FC<DevicesViewProps> = ({ onConnect }) => {
     });
   };
 
-  const handleScan = async () => {
-    setScanning(true);
-    setFound([]);
-    setScanNote(null);
+  /** One sweep. `quiet` is the background one, which must not shout. */
+  const runScan = async (quiet = false) => {
+    if (scanningRef.current) return;
+    scanningRef.current = true;
+    if (!quiet) {
+      setScanning(true);
+      setFound([]);
+      setScanNote(null);
+    }
     try {
       const { hosts, scanned, networks } = await scanForHosts({
         selfOrigin: getHostSignalUrl(),
-        onHost: (host) => setFound((current) => [...current, host]),
+        onHost: quiet ? undefined : (host) => setFound((current) => [...current, host]),
       });
-      const sharing = hosts.filter(isSharing);
+      setFound(hosts);
       if (hosts.length === 0) {
         setScanNote(
           scanned === 0
             ? 'This machine reported no network address, so there was nothing to scan.'
-            : `Nothing answered on ${networks.join(', ') || 'this network'} (${scanned} addresses checked). Check the other machine is running RemoteDesk and is on the same Wi-Fi.`
+            : `Nothing answered on ${networks.join(', ') || 'this network'} (${scanned} addresses checked). Check the other machine is awake with RemoteDesk open, on the same Wi-Fi.`
         );
-      } else if (sharing.length === 0) {
-        setScanNote(
-          `Found ${hosts.length} machine(s) running RemoteDesk, none sharing a screen yet. Start sharing there, then scan again.`
-        );
+      } else {
+        setScanNote(null);
       }
     } catch (error) {
-      setScanNote(`Scan failed: ${error instanceof Error ? error.message : String(error)}`);
+      if (!quiet) {
+        setScanNote(`Scan failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
     } finally {
+      scanningRef.current = false;
       setScanning(false);
     }
   };
 
-  const handleSaveFound = async (host: DiscoveredHost) => {
-    const deskId = autofillDeskId(host) ?? '';
-    const hostname = host.origin.replace(/^https?:\/\//, '');
-    setDraft({
+  const handleScan = () => void runScan();
+
+  /**
+   * Joins a machine found on the network, in one click.
+   *
+   * No save step first: the machine is saved *because* it was connected to,
+   * which is the only moment we know the entry is worth keeping. Asking the
+   * operator to save and then connect is two clicks for one intention.
+   */
+  const handleConnectFound = async (host: DiscoveredHost) => {
+    const deskId = autofillDeskId(host);
+    if (!deskId) {
+      // The other machine is deliberately not publishing its Desk ID — that is
+      // what an open desk with no password does — so it has to be typed.
+      setDraft({
+        id: deviceKey('', [host.origin]),
+        name: hostLabel(host),
+        deskId: '',
+        addresses: [host.origin],
+        pin: '',
+      });
+      showToast({
+        title: `${hostLabel(host)} did not publish its Desk ID`,
+        description:
+          'That machine is set to admit anyone who knows its ID, so it keeps the ID off the network. Read it off that screen and paste it here.',
+        type: 'info',
+        duration: 8000,
+      });
+      return;
+    }
+
+    const device = await persist({
       id: deviceKey(deskId, [host.origin]),
-      name: hostname,
+      name: hostLabel(host),
       deskId,
       addresses: [host.origin],
-      pin: '',
+      pin: null,
+    });
+
+    onConnect({
+      deviceId: device.id,
+      name: device.name,
+      deskId: device.deskId,
+      addresses: device.addresses,
+      pin: device.pin,
     });
   };
 
@@ -226,7 +303,7 @@ export const DevicesView: React.FC<DevicesViewProps> = ({ onConnect }) => {
               className="px-3.5 py-2 rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 text-xs font-bold font-mono flex items-center gap-1.5 transition-colors disabled:opacity-50"
             >
               {scanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Radar className="w-3.5 h-3.5" />}
-              {scanning ? 'Scanning…' : 'Find On My Network'}
+              {scanning ? 'Looking…' : 'Look again'}
             </button>
             <button
               type="button"
@@ -265,15 +342,28 @@ export const DevicesView: React.FC<DevicesViewProps> = ({ onConnect }) => {
         </div>
       </div>
 
-      {/* Scan results */}
-      {(found.length > 0 || scanNote) && (
+      {/* Machines on this network right now. Found without being asked, and
+          joinable without being saved first — the two steps that made
+          connecting feel like configuration rather than a click. */}
+      {(found.length > 0 || scanNote || scanning) && (
         <div className="bg-[#0c0e18]/95 border border-cyan-500/20 rounded-2xl p-5 space-y-2.5">
           <h3 className="text-sm font-bold text-white flex items-center gap-2">
-            <Radar className="w-4 h-4 text-cyan-400" />
-            Found On This Network
+            {scanning ? (
+              <Loader2 className="w-4 h-4 text-cyan-400 animate-spin" />
+            ) : (
+              <Radar className="w-4 h-4 text-cyan-400" />
+            )}
+            On this network
+            {found.length > 0 && (
+              <span className="text-[11px] font-mono text-slate-500">
+                {found.length} found
+              </span>
+            )}
           </h3>
+
           {found.map((host) => {
             const deskId = autofillDeskId(host);
+            const sharing = isSharing(host);
             const known = savedAddresses.has(host.origin);
             return (
               <div
@@ -281,27 +371,26 @@ export const DevicesView: React.FC<DevicesViewProps> = ({ onConnect }) => {
                 className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-cyan-500/15 bg-[#07080f] px-3.5 py-2.5"
               >
                 <div className="min-w-0">
-                  <div className="font-mono text-xs text-cyan-200">{host.origin}</div>
+                  <div className="text-sm font-bold text-cyan-100 truncate">{hostLabel(host)}</div>
                   <div className="text-[11px] text-slate-400 font-mono">
-                    {isSharing(host)
-                      ? deskId
-                        ? `Sharing Desk ID ${deskId}`
-                        : 'Sharing — read the Desk ID off that machine'
-                      : 'Running RemoteDesk, not sharing yet'}
-                    {known && ' · already saved'}
+                    {host.origin.replace(/^https?:\/\//, '')}
+                    {deskId && ` · Desk ${deskId}`}
+                    {!sharing && ' · not sharing yet'}
+                    {known && ' · saved'}
                   </div>
                 </div>
                 <button
                   type="button"
-                  onClick={() => handleSaveFound(host)}
-                  className="px-3 py-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 text-[11px] font-bold font-mono flex items-center gap-1.5"
+                  onClick={() => void handleConnectFound(host)}
+                  className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 text-slate-950 text-[11px] font-extrabold font-mono flex items-center gap-1.5 shadow-[0_0_18px_rgba(6,182,212,0.3)] shrink-0"
                 >
-                  <Plus className="w-3 h-3" />
-                  Save As Device
+                  <Zap className="w-3.5 h-3.5 fill-current" />
+                  Join
                 </button>
               </div>
             );
           })}
+
           {scanNote && <p className="text-[11px] text-slate-400 font-mono leading-relaxed">{scanNote}</p>}
         </div>
       )}
@@ -394,8 +483,9 @@ export const DevicesView: React.FC<DevicesViewProps> = ({ onConnect }) => {
           <MonitorSmartphone className="w-10 h-10 text-cyan-500/40 mx-auto" />
           <p className="text-slate-300 font-semibold">No devices saved yet</p>
           <p className="text-sm text-slate-500 max-w-lg mx-auto">
-            Use <span className="text-cyan-300 font-mono">Find On My Network</span> to pick up
-            machines on this Wi-Fi, or paste the connect link from the other machine&apos;s Host tab.
+            RemoteDesk is already looking for machines on this Wi-Fi — anything it finds appears
+            above, ready to join. Nothing there? Open RemoteDesk on the other machine, or paste
+            the connect link from its Host tab.
           </p>
         </div>
       ) : (

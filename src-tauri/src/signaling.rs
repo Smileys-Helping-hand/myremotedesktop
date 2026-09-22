@@ -186,6 +186,10 @@ pub struct SignalingHandle {
 #[serde(rename_all = "camelCase")]
 pub struct NetworkInfo {
     pub port: u16,
+    /// What this machine calls itself. A scanning client shows this to a
+    /// person, and "Linux laptop" is an answer where "192.168.31.206:4000" is
+    /// a puzzle.
+    pub name: String,
     /// URLs another machine on the same network can reach this host at.
     pub lan_addresses: Vec<String>,
     /// Public quick-tunnel URL, once one has been started. `None` otherwise.
@@ -308,6 +312,7 @@ impl SignalingHandle {
         };
         NetworkInfo {
             port,
+            name: crate::profile::current().name,
             lan_addresses: lan_ipv4_addresses()
                 .into_iter()
                 .map(|ip| format!("http://{ip}:{port}"))
@@ -378,7 +383,10 @@ async fn network_info(State(handle): State<SignalingHandle>) -> impl IntoRespons
 
 /// Answers a LAN discovery probe with the desks this machine is sharing.
 async fn hosts(State(handle): State<SignalingHandle>) -> impl IntoResponse {
-    Json(json!({ "hosts": handle.discoverable_hosts() }))
+    Json(json!({
+        "name": crate::profile::current().name,
+        "hosts": handle.discoverable_hosts(),
+    }))
 }
 
 /// Refuses a request that did not come from this machine.
@@ -1152,6 +1160,13 @@ fn admits_without_asking(room: &Room, provided: Option<&str>) -> bool {
 fn client_join(handle: &SignalingHandle, peer_id: &str, data: &Value) -> Verdict {
     let room_id = room_id_of(data);
     let pin = normalize_pin(str_field(data, "pin"));
+    // Who is knocking. The operator is about to decide whether to let this
+    // machine see their screen, and a peer id tells them nothing.
+    let client_name = str_field(data, "name")
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && name.len() <= 64)
+        .unwrap_or("An unnamed machine")
+        .to_string();
 
     let mut hub = lock(handle);
 
@@ -1212,6 +1227,7 @@ fn client_join(handle: &SignalingHandle, peer_id: &str, data: &Value) -> Verdict
         json!({
             "requestId": request_id,
             "peerId": peer_id,
+            "name": client_name,
             "pin": pin.unwrap_or_default(),
         }),
     );
@@ -1409,6 +1425,24 @@ pub fn start() -> Result<SignalingHandle, String> {
                 let mut bound = None;
                 for offset in 0..PORT_SCAN_RANGE {
                     let port = DEFAULT_PORT + offset;
+
+                    // Claim loopback first, even though the real listener is on
+                    // every interface.
+                    //
+                    // Windows lets `0.0.0.0:P` bind while another program holds
+                    // `127.0.0.1:P`, and then hands loopback traffic to the more
+                    // specific socket. The result is an app that looks healthy —
+                    // it is listening, peers on the LAN reach it — while its own
+                    // UI, which talks to `127.0.0.1`, is answering to somebody
+                    // else's server. Seen for real here: another project's dev
+                    // server on 4000 meant the Host tab showed that project's
+                    // 404 page. If loopback is not ours, the port is not ours.
+                    let probe = SocketAddr::from(([127, 0, 0, 1], port));
+                    let Ok(probe_listener) = tokio::net::TcpListener::bind(probe).await else {
+                        continue;
+                    };
+                    drop(probe_listener);
+
                     let addr = SocketAddr::from(([0, 0, 0, 0], port));
                     if let Ok(listener) = tokio::net::TcpListener::bind(addr).await {
                         bound = Some((listener, port));

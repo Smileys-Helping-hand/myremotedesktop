@@ -249,6 +249,12 @@ function admitsWithoutAsking(room: Room, provided: string | undefined): boolean 
   return room.unattended || pinGrantsEntry(room.pin, provided);
 }
 
+/** Who is knocking, as the host operator will see it. */
+function clientName(data: any): string {
+  const name = typeof data?.name === 'string' ? data.name.trim() : '';
+  return name && name.length <= 64 ? name : 'An unnamed machine';
+}
+
 function clientJoin(peerId: string, data: any) {
   const roomId = roomIdOf(data);
   const pin = normalizePin(data?.pin);
@@ -285,7 +291,12 @@ function clientJoin(peerId: string, data: any) {
   }, AUTH_TIMEOUT_MS);
 
   pendingAuth.set(requestId, { clientId: peerId, roomId, timer });
-  send(room.hostId, 'peer:join-request', { requestId, peerId, pin: pin ?? '' });
+  send(room.hostId, 'peer:join-request', {
+    requestId,
+    peerId,
+    name: clientName(data),
+    pin: pin ?? '',
+  });
 }
 
 function hostAuthResult(peerId: string, data: any) {
@@ -401,6 +412,14 @@ app.get('/healthz', (_req, res) => {
  * knows its Desk ID, so publishing that ID on the network would hand the host
  * to every device on the LAN. Such a room is announced without its ID.
  */
+/**
+ * What this relay calls itself to a scanning client.
+ *
+ * A relay is not a desk — nobody's screen is here — but it does answer a scan,
+ * and an address alone tells the person looking at the list nothing.
+ */
+const RELAY_NAME = process.env.RELAY_NAME?.trim() || `RemoteDesk relay (${os.hostname()})`;
+
 function discoverableHosts() {
   return Array.from(rooms.values())
     .map((room) => ({
@@ -415,6 +434,7 @@ function discoverableHosts() {
 app.get('/network-info', (_req, res) => {
   res.json({
     port: PORT,
+    name: RELAY_NAME,
     lanAddresses: getLocalIpAddresses().map((ip) => `http://${ip}:${PORT}`),
     tunnelUrl: null,
     rooms: rooms.size,
@@ -427,7 +447,7 @@ app.get('/network-info', (_req, res) => {
 });
 
 app.get('/hosts', (_req, res) => {
-  res.json({ hosts: discoverableHosts() });
+  res.json({ name: RELAY_NAME, hosts: discoverableHosts() });
 });
 
 /** Extensions this server will offer. Anything else in the directory is ignored. */

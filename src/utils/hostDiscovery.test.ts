@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   autofillDeskId,
   candidateOrigins,
+  hostLabel,
   isSharing,
   parseLanAddress,
   probeOrigin,
@@ -222,9 +223,41 @@ describe('scanForHosts', () => {
   });
 });
 
+describe('naming a discovered host', () => {
+  it('prefers the name the machine gave over its address', async () => {
+    const fetchImpl = fakeFetch({
+      'http://192.168.1.50:4000/network-info': { rooms: 1, connections: 0, name: 'Linux laptop' },
+      'http://192.168.1.50:4000/hosts': { name: 'Linux laptop', hosts: [] },
+    });
+    const host = await probeOrigin('http://192.168.1.50:4000', 50, fetchImpl);
+    expect(host?.name).toBe('Linux laptop');
+    expect(hostLabel(host!)).toBe('Linux laptop');
+  });
+
+  it('falls back to the address when the machine is too old to say', async () => {
+    // An address is a poor label, but it is honest — inventing a name would
+    // put something in the list that matches nothing on the other screen.
+    const fetchImpl = fakeFetch({
+      'http://192.168.1.50:4000/network-info': { rooms: 1, connections: 0 },
+    });
+    const host = await probeOrigin('http://192.168.1.50:4000', 50, fetchImpl);
+    expect(host?.name).toBeNull();
+    expect(hostLabel(host!)).toBe('192.168.1.50:4000');
+  });
+
+  it('ignores a blank name rather than showing an empty row', async () => {
+    const fetchImpl = fakeFetch({
+      'http://192.168.1.50:4000/network-info': { rooms: 1, connections: 0, name: '   ' },
+    });
+    const host = await probeOrigin('http://192.168.1.50:4000', 50, fetchImpl);
+    expect(hostLabel(host!)).toBe('192.168.1.50:4000');
+  });
+});
+
 describe('reading a discovered host', () => {
   const host = (desks: DiscoveredHost['desks'], rooms = desks.length): DiscoveredHost => ({
     origin: 'http://192.168.1.77:4000',
+    name: null,
     desks,
     rooms,
     connections: 0,

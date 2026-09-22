@@ -12,6 +12,13 @@ export interface WebRTCOptions {
   serverUrl?: string;
   unattended?: boolean;
   pin?: string;
+  /**
+   * What to call this machine when knocking on another one's door.
+   *
+   * The host operator decides whether to let us see their screen; a peer id
+   * gives them nothing to decide with.
+   */
+  clientName?: string;
   onRemotePacket?: (packet: RemoteControlPacket) => void;
   /**
    * A client is waiting for the person at this machine to let it in.
@@ -28,6 +35,8 @@ export interface WebRTCOptions {
 export interface JoinRequest {
   requestId: string;
   peerId: string;
+  /** What the machine knocking calls itself, when it said. */
+  name?: string;
   /** What the client presented, so the operator can see a near miss. */
   pin: string;
 }
@@ -203,6 +212,7 @@ export function useWebRTC(options: WebRTCOptions = {}) {
     pin: initialPin,
     onRemotePacket,
     onJoinRequest,
+    clientName,
     onRemoteMouse,
     iceServers = getCustomIceServers(),
   } = options;
@@ -216,6 +226,14 @@ export function useWebRTC(options: WebRTCOptions = {}) {
   const [signalingState, setSignalingState] = useState<RTCSignalingState>('stable');
   const [isSocketConnected, setIsSocketConnected] = useState<boolean>(false);
   const [joinError, setJoinError] = useState<string | null>(null);
+  /**
+   * Whether the host actually let us in.
+   *
+   * Distinct from having asked: a host set to "ask me first" leaves a client
+   * waiting while somebody decides, and telling the operator they are connected
+   * during that wait is simply wrong.
+   */
+  const [isAdmitted, setIsAdmitted] = useState(false);
   const [dataChannelsReady, setDataChannelsReady] = useState<{ mouse: boolean; events: boolean }>({
     mouse: false,
     events: false,
@@ -251,6 +269,7 @@ export function useWebRTC(options: WebRTCOptions = {}) {
   const unattendedRef = useRef<boolean>(unattended);
   const pinRef = useRef<string | undefined>(initialPin);
   const requireApprovalRef = useRef<boolean>(false);
+  const clientNameRef = useRef<string | undefined>(clientName);
 
   // Mutable packet counters
   const packetsSentRef = useRef<number>(0);
@@ -280,6 +299,10 @@ export function useWebRTC(options: WebRTCOptions = {}) {
   useEffect(() => {
     onJoinRequestRef.current = onJoinRequest;
   }, [onJoinRequest]);
+
+  useEffect(() => {
+    clientNameRef.current = clientName;
+  }, [clientName]);
 
   useEffect(() => {
     onRemoteMouseRef.current = onRemoteMouse;
@@ -765,6 +788,7 @@ export function useWebRTC(options: WebRTCOptions = {}) {
             socket?.emit('client:join', {
               roomId: roomIdRef.current,
               pin: pinRef.current,
+              name: clientNameRef.current,
             });
           }
         }
@@ -810,7 +834,12 @@ export function useWebRTC(options: WebRTCOptions = {}) {
       // a pin that has since moved on. There is no human-approval UI behind
       // this event today, so the only honest response is to deny: the server
       // already told us why.
-      socket.on('peer:join-request', (request: { requestId: string; peerId: string; pin: string }) => {
+      socket.on('peer:join-request', (request: {
+        requestId: string;
+        peerId: string;
+        name?: string;
+        pin: string;
+      }) => {
         const handler = onJoinRequestRef.current;
         if (!handler) {
           // Nothing is listening, so nobody can say yes. Denying is the only
@@ -826,6 +855,7 @@ export function useWebRTC(options: WebRTCOptions = {}) {
         handler({
           requestId: request.requestId,
           peerId: request.peerId,
+          name: request.name,
           pin: request.pin ?? '',
         });
       });
@@ -834,6 +864,7 @@ export function useWebRTC(options: WebRTCOptions = {}) {
       socket.on('join:result', (res: { granted: boolean; roomId?: string; hostId?: string; peerId?: string; reason?: string }) => {
         if (res.granted) {
           setJoinError(null);
+          setIsAdmitted(true);
           if (res.hostId) {
             remotePeerIdRef.current = res.hostId;
           }
@@ -844,6 +875,7 @@ export function useWebRTC(options: WebRTCOptions = {}) {
           // the field still points at this machine's own signaling server.
           const reason = res.reason || 'Join request rejected';
           setJoinError(`${reason} (asked ${serverUrl})`);
+          setIsAdmitted(false);
           setConnectionState('failed');
         }
       });
@@ -893,6 +925,7 @@ export function useWebRTC(options: WebRTCOptions = {}) {
             socket.emit('client:join', {
               roomId: targetRoomId,
               pin: pin?.trim().toUpperCase(),
+              name: clientNameRef.current,
             });
           }
         } else {
@@ -1004,6 +1037,7 @@ export function useWebRTC(options: WebRTCOptions = {}) {
 
   // Leave Room
   const leaveRoom = useCallback(() => {
+    setIsAdmitted(false);
     const currentRoomId = roomIdRef.current;
     if (currentRoomId) {
       sendSignalingMessage({
@@ -1070,6 +1104,7 @@ export function useWebRTC(options: WebRTCOptions = {}) {
     joinRoom,
     registerHost,
     answerJoinRequest,
+    isAdmitted,
     leaveRoom,
     severAllConnections,
     sendMousePacket,

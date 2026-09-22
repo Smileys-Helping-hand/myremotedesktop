@@ -32,6 +32,14 @@ export interface DiscoveredDesk {
 export interface DiscoveredHost {
   /** Origin to put in the client's Server Address field. */
   origin: string;
+  /**
+   * What the machine calls itself.
+   *
+   * `null` from a build too old to say, and from a plain in-page sweep of a
+   * server that does not publish one — the address is then all there is to
+   * show, which is exactly the puzzle this field exists to avoid.
+   */
+  name: string | null;
   /** Desks it is sharing. Empty when it is running but not hosting. */
   desks: DiscoveredDesk[];
   /** Rooms it reports, which is what makes it a host rather than a bystander. */
@@ -160,10 +168,11 @@ export async function probeOrigin(
     rooms?: number;
     connections?: number;
     activeRooms?: unknown;
+    name?: unknown;
   }>(`${origin}/network-info`, timeoutMs, fetchImpl, signal);
   if (!info || typeof info.rooms !== 'number') return null;
 
-  const listing = await fetchJson<{ hosts?: DiscoveredDesk[] }>(
+  const listing = await fetchJson<{ hosts?: DiscoveredDesk[]; name?: unknown }>(
     `${origin}/hosts`,
     timeoutMs,
     fetchImpl,
@@ -174,10 +183,16 @@ export async function probeOrigin(
 
   return {
     origin,
+    name: readName(listing?.name) ?? readName(info.name),
     rooms: info.rooms,
     connections: typeof info.connections === 'number' ? info.connections : 0,
     desks,
   };
+}
+
+/** A machine name worth showing, or nothing. */
+function readName(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
 /**
@@ -277,6 +292,7 @@ async function nativeScan(
   const report = await fetchJson<{
     hosts?: Array<{
       origin?: string;
+      name?: unknown;
       rooms?: number;
       connections?: number;
       hosts?: unknown;
@@ -293,6 +309,7 @@ async function nativeScan(
       .filter((host) => typeof host.origin === 'string' && typeof host.rooms === 'number')
       .map((host) => ({
         origin: host.origin as string,
+        name: readName(host.name),
         rooms: host.rooms as number,
         connections: typeof host.connections === 'number' ? host.connections : 0,
         desks: desksFrom(host.hosts, host.activeRooms),
@@ -355,6 +372,11 @@ export async function scanForHosts(options: ScanOptions = {}): Promise<ScanResul
 
   hosts.sort((a, b) => b.rooms - a.rooms || a.origin.localeCompare(b.origin));
   return { hosts, scanned: candidates.length, networks };
+}
+
+/** What to call a discovered machine in a list a person reads. */
+export function hostLabel(host: DiscoveredHost): string {
+  return host.name ?? host.origin.replace(/^https?:\/\//, '');
 }
 
 /** Whether a discovered server has a desk a client could join right now. */

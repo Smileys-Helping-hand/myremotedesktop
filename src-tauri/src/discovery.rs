@@ -48,6 +48,8 @@ const MAX_BODY: usize = 256 * 1024;
 #[serde(rename_all = "camelCase")]
 pub struct FoundHost {
     pub origin: String,
+    /// What the machine calls itself, when it said. Older builds do not.
+    pub name: Option<String>,
     pub rooms: usize,
     pub connections: usize,
     /// Body of the remote's `/hosts`, when it has that endpoint.
@@ -186,6 +188,12 @@ async fn probe(addr: SocketAddr) -> Option<FoundHost> {
         .and_then(Value::as_u64)
         .unwrap_or(0) as usize;
 
+    let name = info
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .filter(|n| !n.is_empty());
+
     let active_rooms = info.get("activeRooms").and_then(Value::as_array).map(|ids| {
         ids.iter()
             .filter_map(|id| id.as_str().map(str::to_string))
@@ -201,6 +209,7 @@ async fn probe(addr: SocketAddr) -> Option<FoundHost> {
 
     Some(FoundHost {
         origin: format!("http://{addr}"),
+        name,
         rooms,
         connections,
         hosts,

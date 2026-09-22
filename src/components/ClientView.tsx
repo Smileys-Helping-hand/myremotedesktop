@@ -49,6 +49,7 @@ import {
   DiscoveredHost,
 } from '../utils/hostDiscovery';
 import { deviceKey, saveDevice, touchDevice } from '../utils/deviceBook';
+import { loadProfile } from '../utils/machineProfile';
 
 /** A device the operator picked in the device book, to connect to now. */
 export interface ClientConnectRequest {
@@ -129,6 +130,18 @@ export const ClientView: React.FC<ClientViewProps> = ({
   const [dialing, setDialing] = useState<{ request: ClientConnectRequest; index: number } | null>(
     null
   );
+  /** This machine's name, which the host is shown when we knock. */
+  const [myName, setMyName] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadProfile().then((profile) => {
+      if (!cancelled) setMyName(profile.name);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Update room ID if initialRoomId prop changes or from URL hash
   useEffect(() => {
@@ -250,12 +263,14 @@ export const ClientView: React.FC<ClientViewProps> = ({
     stats,
     joinRoom,
     leaveRoom,
+    isAdmitted,
     sendMousePacket,
     sendEventPacket,
     getDataChannelBufferedAmount,
   } = useWebRTC({
     role: 'client',
     serverUrl: serverUrlInput,
+    clientName: myName ?? undefined,
     onRemotePacket: (packet) => handleIncomingPacket(packet),
     onRemoteMouse: () => {},
   });
@@ -1069,9 +1084,25 @@ export const ClientView: React.FC<ClientViewProps> = ({
                     <Tv className="w-8 h-8 opacity-75" />
                   </div>
                   <div>
-                    <p className="text-base font-semibold text-slate-200">No Stream Connected</p>
+                    {/* Joined but nothing arriving means the other machine has
+                        not started sharing — a different situation from not
+                        being connected, and the one people read as a failure
+                        when the panel says nothing. */}
+                    <p className="text-base font-semibold text-slate-200">
+                      {isAdmitted
+                        ? 'Waiting for the other machine to share'
+                        : isJoined
+                          ? 'Waiting to be let in'
+                          : 'No Stream Connected'}
+                    </p>
                     <p className="text-xs text-slate-400 max-w-sm mx-auto mt-1">
-                      Enter the Host&apos;s Desk ID above and click &quot;Connect&quot; to begin remote control.
+                      {isAdmitted
+                        ? connectRequest?.name
+                          ? `You are connected to ${connectRequest.name}. It will appear here as soon as someone there presses Allow and share, or Start Real Screen Share.`
+                          : 'You are connected. The screen appears here as soon as the other machine starts sharing.'
+                        : isJoined
+                          ? `Somebody at ${connectRequest?.name ?? 'the other machine'} has to press Allow. This waits until they do.`
+                          : 'Enter the Host’s Desk ID above and click “Connect” to begin remote control.'}
                     </p>
                   </div>
                 </div>

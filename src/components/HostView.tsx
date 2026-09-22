@@ -56,7 +56,7 @@ import {
   updateProfile,
 } from '../utils/machineProfile';
 import { makeConnectLink } from '../utils/deviceBook';
-import { tauriOpenSessionInBrowser } from '../utils/tauriBridge';
+import { isTauri, tauriOpenSessionInBrowser } from '../utils/tauriBridge';
 
 interface HostViewProps {
   onSwitchToClient?: (roomId: string, pin?: string) => void;
@@ -106,6 +106,21 @@ function captureDiagnosis(): { reason: string; fix: string } | null {
 
 const CAPTURE_DIAGNOSIS = captureDiagnosis();
 
+/**
+ * Whether this page is entitled to publish a desk on the server it talks to.
+ *
+ * The app, and the browser page its own machine serves over loopback, are this
+ * machine. A page served by *another* machine is a visitor: it was opened to
+ * connect to that host, and it cannot share this screen through that host's
+ * server anyway. Registering there anyway is what it used to do, and every
+ * browser that opened a host's page added a desk to that host's list — a
+ * machine that did not exist, cluttering the network view on both sides.
+ */
+const OWNS_ITS_SERVER =
+  isTauri() ||
+  (typeof window !== 'undefined' &&
+    ['localhost', '127.0.0.1', '::1', ''].includes(window.location.hostname));
+
 export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
   const { showToast } = useToast();
 
@@ -126,6 +141,7 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
   const [pendingJoin, setPendingJoin] = useState<{
     requestId: string;
     peerId: string;
+    name?: string;
     pin: string;
   } | null>(null);
   const [copiedRoom, setCopiedRoom] = useState(false);
@@ -311,7 +327,7 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
   // PIN; `registerHost` deliberately leaves an established peer connection
   // alone, so toggling a setting mid-session does not drop the client.
   useEffect(() => {
-    if (!profile) return;
+    if (!profile || !OWNS_ITS_SERVER) return;
     const { pin, unattended, requireApproval } = registrationSecret(profile, rotatingPin);
     registerHost(roomId, pin, unattended, requireApproval);
   }, [registerHost, roomId, profile, rotatingPin]);
@@ -605,18 +621,35 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
     }
   };
 
-  /** Answers the client waiting at the door. */
-  const handleAnswerJoin = (granted: boolean) => {
+  /**
+   * Answers the client waiting at the door, and optionally starts sharing.
+   *
+   * Sharing has to begin in the same click. The screen picker only opens from
+   * a user gesture, so the app cannot start capture on its own when someone
+   * connects — and a client admitted to a host that is not sharing sees a
+   * blank panel and no explanation. Allowing and sharing together is the one
+   * press that makes the whole thing work.
+   */
+  const handleAnswerJoin = (granted: boolean, alsoShare = false) => {
     if (!pendingJoin) return;
+    const who = pendingJoin.name ?? 'The other machine';
     answerJoinRequest(pendingJoin.requestId, granted);
     setPendingJoin(null);
+
+    if (granted && alsoShare && !isStreaming) {
+      void handleStartSharing();
+      return;
+    }
+
     showToast({
-      title: granted ? 'Client allowed in' : 'Client refused',
+      title: granted ? `${who} is in` : `${who} was refused`,
       description: granted
-        ? 'They can now see this screen.'
+        ? isStreaming
+          ? 'They can see this screen now.'
+          : 'They are connected, but nothing is being shared yet — press Start Real Screen Share.'
         : 'They were told this machine refused.',
       type: granted ? 'success' : 'info',
-      duration: 4000,
+      duration: 5000,
     });
   };
 
@@ -735,6 +768,19 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto pb-2">
+      {/* A page served by another machine is a visitor here, and saying so is
+          better than a Host tab that looks armed and publishes nothing. */}
+      {!OWNS_ITS_SERVER && (
+        <div className="bg-[#0c0e18]/95 border border-cyan-500/20 rounded-2xl p-4 space-y-1.5">
+          <h3 className="text-sm font-bold text-cyan-200">This page belongs to another machine</h3>
+          <p className="text-xs text-slate-400 leading-relaxed">
+            You are looking at RemoteDesk served by {typeof window !== 'undefined' ? window.location.host : 'another machine'}.
+            Use the Client tab to connect to it. To share <em>this</em> screen, open the RemoteDesk
+            app on this machine instead.
+          </p>
+        </div>
+      )}
+
       {/* This window cannot share, and saying so up front beats a dead button. */}
       {CAPTURE_DIAGNOSIS && (
         <div className="bg-amber-950/30 border border-amber-500/40 rounded-2xl p-4 space-y-2.5">
@@ -767,9 +813,11 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
                 <Shield className="w-5 h-5 text-cyan-300" />
               </div>
               <div>
-                <h3 className="text-lg font-extrabold text-white">Someone wants to connect</h3>
+                <h3 className="text-lg font-extrabold text-white">
+                  {pendingJoin.name ?? 'Someone'} wants to connect
+                </h3>
                 <p className="text-xs text-slate-400 font-mono">
-                  Peer {pendingJoin.peerId} · Desk {roomId}
+                  Desk {roomId} · peer {pendingJoin.peerId}
                 </p>
               </div>
             </div>
@@ -782,21 +830,36 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
               Only allow this if you know who it is.
             </p>
 
-            <div className="flex items-center gap-2.5">
-              <button
-                type="button"
-                onClick={() => handleAnswerJoin(true)}
-                className="flex-1 px-4 py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 text-slate-950 text-sm font-extrabold font-mono"
-              >
-                Allow
-              </button>
-              <button
-                type="button"
-                onClick={() => handleAnswerJoin(false)}
-                className="flex-1 px-4 py-2.5 rounded-xl bg-rose-600/90 hover:bg-rose-500 text-white text-sm font-bold font-mono"
-              >
-                Refuse
-              </button>
+            <div className="space-y-2.5">
+              {!isStreaming && (
+                <button
+                  type="button"
+                  onClick={() => handleAnswerJoin(true, true)}
+                  className="w-full px-4 py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 text-slate-950 text-sm font-extrabold font-mono"
+                >
+                  Allow and share my screen
+                </button>
+              )}
+              <div className="flex items-center gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => handleAnswerJoin(true)}
+                  className={`flex-1 px-4 py-2.5 rounded-xl text-sm font-bold font-mono ${
+                    isStreaming
+                      ? 'bg-gradient-to-r from-cyan-500 to-blue-600 text-slate-950 font-extrabold'
+                      : 'bg-[#07080f] border border-cyan-500/30 text-cyan-200'
+                  }`}
+                >
+                  {isStreaming ? 'Allow' : 'Allow without sharing'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleAnswerJoin(false)}
+                  className="flex-1 px-4 py-2.5 rounded-xl bg-rose-600/90 hover:bg-rose-500 text-white text-sm font-bold font-mono"
+                >
+                  Refuse
+                </button>
+              </div>
             </div>
           </div>
         </div>,
