@@ -88,22 +88,22 @@
       </header>
 
       <div class="downloads">
-        <a class="dl primary" id="pick" href="/downloads/RemoteDesk_1.1.4_x64-setup.exe" download>
+        <a class="dl primary" id="pick" href="/downloads/RemoteDesk_1.2.0_x64-setup.exe" download>
           <div class="os">Download for Windows</div>
-          <div class="meta">Version 1.1.4 · 3 MB · Windows 10 and 11</div>
+          <div class="meta">Version 1.2.0 · 3 MB · Windows 10 and 11</div>
         </a>
-        <a class="dl" href="/downloads/RemoteDesk_1.1.4_amd64.AppImage" download>
+        <a class="dl" href="/downloads/RemoteDesk_1.2.0_amd64.AppImage" download>
           <div class="os">Download for Linux</div>
           <div class="meta">AppImage · 82 MB · runs on any distribution</div>
         </a>
       </div>
 
       <div class="row" style="margin-top: 4px">
-        <a class="dl" href="/downloads/RemoteDesk_1.1.4_amd64.deb" download>
+        <a class="dl" href="/downloads/RemoteDesk_1.2.0_amd64.deb" download>
           <div class="os">Linux · .deb</div>
           <div class="meta">Ubuntu, Debian, Mint · 5 MB</div>
         </a>
-        <a class="dl" href="/downloads/RemoteDesk-1.1.4-1.x86_64.rpm" download>
+        <a class="dl" href="/downloads/RemoteDesk-1.2.0-1.x86_64.rpm" download>
           <div class="os">Linux · .rpm</div>
           <div class="meta">Fedora, openSUSE · 5 MB</div>
         </a>
@@ -171,7 +171,7 @@
       </div>
 
       <footer>
-        RemoteDesk 1.1.4 · Windows and Linux · <code>WebRTC + Tauri + Rust</code>
+        RemoteDesk 1.2.0 · Windows and Linux · <code>WebRTC + Tauri + Rust</code>
       </footer>
     </div>
 
@@ -183,7 +183,7 @@
         var ua = navigator.userAgent;
         var pick = document.getElementById('pick');
         if (/Linux/i.test(ua) && !/Android/i.test(ua)) {
-          pick.setAttribute('href', '/downloads/RemoteDesk_1.1.4_amd64.AppImage');
+          pick.setAttribute('href', '/downloads/RemoteDesk_1.2.0_amd64.AppImage');
           pick.querySelector('.os').textContent = 'Download for Linux';
           pick.querySelector('.meta').textContent =
             'AppImage · 82 MB · runs on any distribution';
