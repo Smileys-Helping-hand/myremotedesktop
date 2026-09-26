@@ -19,6 +19,7 @@ import {
   Loader2,
 } from 'lucide-react';
 import { useWebRTC, getHostSignalUrl } from '../hooks/useWebRTC';
+import { getPublicRelayUrl } from '../utils/publicRelay';
 import {
   RemoteControlPacket,
   RemoteMouseButtonPayload,
@@ -151,6 +152,10 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
   const [firewallBlocked, setFirewallBlocked] = useState<{ fixCommand: string } | null>(null);
   // Hosting always uses this machine's own signaling server.
   const [serverUrl] = useState<string>(() => getHostSignalUrl());
+  // And on the public relay, so a machine on another network can reach this
+  // desk by the same Desk ID. Only a page that owns its server hosts at all.
+  const [relayUrl] = useState<string | null>(() => (OWNS_ITS_SERVER ? getPublicRelayUrl() : null));
+  const [showTunnel, setShowTunnel] = useState(false);
 
   // Rotating Security PIN
   const {
@@ -258,6 +263,7 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
     stats,
     registerHost,
     answerJoinRequest,
+    relayStatus,
     leaveRoom,
     severAllConnections,
     sendEventPacket,
@@ -272,6 +278,8 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
     ).pin,
     localStream: activeStream,
     serverUrl,
+    relayUrl,
+    relayOwnerKey: profile?.relayKey,
     onRemotePacket: (packet) => handleIncomingPacket(packet),
     // Somebody is knocking. Showing the request is the whole of "ask me each
     // time"; with no handler the hook denies, which is safe but useless.
@@ -1053,11 +1061,51 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
           </div>
         )}
 
-        {/* Cloudflare Public Internet Access Banner (Zero Registration) */}
+        {/* Reachable from other networks, through the public relay */}
+        {OWNS_ITS_SERVER && (
+          <div
+            className={`mt-3 pt-3 border-t border-cyan-500/15 flex items-start gap-2 text-xs font-mono ${
+              relayStatus.state === 'online'
+                ? 'text-emerald-200'
+                : relayStatus.state === 'refused'
+                  ? 'text-amber-200'
+                  : 'text-slate-400'
+            }`}
+          >
+            {relayStatus.state === 'online' ? (
+              <Globe className="w-4 h-4 text-emerald-400 shrink-0" />
+            ) : relayStatus.state === 'refused' ? (
+              <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+            ) : relayStatus.state === 'connecting' ? (
+              <Loader2 className="w-4 h-4 text-slate-400 shrink-0 animate-spin" />
+            ) : (
+              <Globe className="w-4 h-4 text-slate-500 shrink-0" />
+            )}
+            <div className="leading-relaxed">
+              {relayStatus.state === 'online' && (
+                <>
+                  <span className="font-bold">Reachable from anywhere.</span> On any other network,
+                  open RemoteDesk, type Desk ID <span className="font-bold">{roomId}</span> and press
+                  Connect — no addresses or port forwarding needed.
+                </>
+              )}
+              {relayStatus.state === 'connecting' && <>Connecting to the public relay, so other networks can reach this desk…</>}
+              {relayStatus.state === 'refused' && (
+                <>
+                  <span className="font-bold">Only reachable on this network.</span> {relayStatus.reason}
+                </>
+              )}
+              {relayStatus.state === 'off' && <>The public relay is switched off; only this network can reach this desk.</>}
+            </div>
+          </div>
+        )}
+
+        {/* Cloudflare quick tunnel: lets a phone or browser with nothing installed reach this host */}
+        {(showTunnel || tunnelUrl) && (
         <div className="mt-3 pt-3 border-t border-cyan-500/15 flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
           <div className="flex flex-wrap items-center gap-2">
             <Globe className="w-4 h-4 text-emerald-400 shrink-0" />
-            <span className="text-slate-300">Outside / Internet Access (Cloudflare):</span>
+            <span className="text-slate-300">Web link for a browser (Cloudflare):</span>
             {tunnelUrl ? (
               <div className="flex items-center gap-1.5">
                 <button
@@ -1094,6 +1142,16 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
             </button>
           )}
         </div>
+        )}
+        {!showTunnel && !tunnelUrl && (
+          <button
+            type="button"
+            onClick={() => setShowTunnel(true)}
+            className="mt-2 text-[11px] font-mono text-slate-500 hover:text-slate-300 underline underline-offset-2"
+          >
+            Need a web link for a browser with nothing installed?
+          </button>
+        )}
       </div>
 
       {/* Main Grid */}

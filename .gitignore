@@ -37,3 +37,7 @@ installers/
 # The public site's copy of the installers, built by scripts/, not by hand.
 web/downloads/
 web/app/
+
+# The public relay's local dev state and dependencies
+relay/node_modules/
+relay/.wrangler/

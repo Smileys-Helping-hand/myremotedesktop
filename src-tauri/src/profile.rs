@@ -47,6 +47,17 @@ pub struct Profile {
     /// The fixed password, when the mode is `Password`.
     #[serde(default)]
     pub access_password: Option<String>,
+    /// Proves to the public relay that this machine owns its Desk ID.
+    ///
+    /// On the LAN a host's own server holds its room, so nobody else can
+    /// register it. The public relay is shared by everyone, so the first
+    /// machine to claim an ID there binds it to this key; without it, a
+    /// stranger who learned the ID could sit in the room and receive the
+    /// password of whoever connected. Never leaves this machine except to the
+    /// relay, which keeps only its hash. Generated on first load for profiles
+    /// written before it existed.
+    #[serde(default)]
+    pub relay_key: String,
 }
 
 impl Profile {
@@ -56,6 +67,7 @@ impl Profile {
             name,
             access_mode: AccessMode::default(),
             access_password: None,
+            relay_key: generate_relay_key(),
         }
     }
 }
@@ -70,7 +82,15 @@ static STORE: OnceLock<Store> = OnceLock::new();
 /// Loads this machine's profile, creating one the first time.
 pub fn init(path: PathBuf) {
     let profile = match load(&path) {
-        Ok(Some(profile)) => profile,
+        Ok(Some(mut profile)) => {
+            if profile.relay_key.len() < 32 {
+                profile.relay_key = generate_relay_key();
+                if let Err(err) = persist(&path, &profile) {
+                    eprintln!("[remotedesk] could not save the relay key: {err}");
+                }
+            }
+            profile
+        }
         Ok(None) => {
             let fresh = Profile::new(machine_name());
             if let Err(err) = persist(&path, &fresh) {
@@ -201,6 +221,17 @@ fn generate_desk_id() -> String {
     value.to_string()
 }
 
+/// 256 bits from the OS random source, as hex.
+fn generate_relay_key() -> String {
+    let mut bytes = [0u8; 32];
+    if getrandom::getrandom(&mut bytes).is_err() {
+        // An empty key is refused by the relay, which is the honest outcome:
+        // this machine simply is not reachable from other networks.
+        return String::new();
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// A name a person would recognise, falling back to something honest.
 fn machine_name() -> String {
     for key in ["COMPUTERNAME", "HOSTNAME", "HOST"] {
@@ -262,6 +293,7 @@ mod tests {
             name: "Linux laptop".into(),
             access_mode: AccessMode::Password,
             access_password: Some("hunter2".into()),
+            relay_key: "k".repeat(64),
         };
         persist(&path, &profile).unwrap();
 
@@ -269,6 +301,7 @@ mod tests {
         assert_eq!(read.desk_id, "903117");
         assert_eq!(read.access_mode, AccessMode::Password);
         assert_eq!(read.access_password.as_deref(), Some("hunter2"));
+        assert_eq!(read.relay_key, "k".repeat(64));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -280,5 +313,34 @@ mod tests {
             serde_json::from_str(r#"{"deskId":"903117","name":"Laptop"}"#).unwrap();
         assert_eq!(profile.desk_id, "903117");
         assert_eq!(profile.access_mode, AccessMode::Ask);
+        assert!(profile.relay_key.is_empty(), "filled in by init, not by serde");
+    }
+
+    #[test]
+    fn a_relay_key_is_256_random_bits() {
+        let a = generate_relay_key();
+        let b = generate_relay_key();
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn an_older_profile_gains_a_relay_key_that_sticks() {
+        let dir = std::env::temp_dir().join(format!("remotedesk-relaykey-{}", std::process::id()));
+        let path = dir.join("profile.json");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&path, br#"{"deskId":"903117","name":"Laptop"}"#).unwrap();
+
+        let mut loaded = load(&path).unwrap().unwrap();
+        loaded.relay_key = generate_relay_key();
+        persist(&path, &loaded).unwrap();
+
+        let again = load(&path).unwrap().unwrap();
+        assert_eq!(again.desk_id, "903117", "upgrading must keep the Desk ID");
+        assert_eq!(again.relay_key, loaded.relay_key);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -25,7 +25,9 @@ export default defineConfig({
       ? { protocol: 'ws', host: process.env.TAURI_DEV_HOST, port: DEV_PORT + 1 }
       : undefined,
     watch: {
-      ignored: ['**/src-tauri/**'],
+      // The relay is a separate Worker; `wrangler dev` rewrites its local
+      // database constantly, and watching it reloads the app every second.
+      ignored: ['**/src-tauri/**', '**/relay/**'],
     },
   },
   envPrefix: ['VITE_', 'TAURI_'],

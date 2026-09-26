@@ -17,6 +17,11 @@ export interface MachineProfile {
   accessMode: AccessMode;
   /** The fixed password, when the mode is `password`. */
   accessPassword?: string | null;
+  /**
+   * Proves to the public relay that this machine owns its Desk ID. Issued by
+   * the app; a page with no app behind it mints and keeps its own.
+   */
+  relayKey?: string;
 }
 
 const LOCAL_KEY = 'remotedesk_profile';
@@ -38,6 +43,13 @@ function randomDeskId(): string {
   return String((random[0] % 900000) + 100000);
 }
 
+/** 256 random bits as hex, for a page with no app to issue a relay key. */
+export function randomRelayKey(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 function defaultName(): string {
   if (typeof window === 'undefined') return 'RemoteDesk host';
   return window.location.hostname || 'RemoteDesk host';
@@ -49,14 +61,21 @@ function readLocal(): MachineProfile {
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<MachineProfile>;
       if (parsed.deskId) {
-        return {
+        const profile: MachineProfile = {
           deskId: parsed.deskId,
           name: parsed.name || defaultName(),
           // Asking is the default everywhere: it is the only rule that cannot
           // surprise the owner of the machine.
           accessMode: parsed.accessMode ?? 'ask',
           accessPassword: parsed.accessPassword ?? null,
+          relayKey: parsed.relayKey,
         };
+        // Profiles saved before the relay existed gain a key, kept from then on.
+        if (!profile.relayKey || profile.relayKey.length < 32) {
+          profile.relayKey = randomRelayKey();
+          writeLocal(profile);
+        }
+        return profile;
       }
     }
   } catch {
@@ -67,6 +86,7 @@ function readLocal(): MachineProfile {
     name: defaultName(),
     accessMode: 'ask',
     accessPassword: null,
+    relayKey: randomRelayKey(),
   };
   writeLocal(fresh);
   return fresh;

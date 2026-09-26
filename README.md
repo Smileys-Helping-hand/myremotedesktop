@@ -177,8 +177,8 @@ On the **client**: switch to the **Client** tab *(on Linux the UI opens in your 
 is expected; see *Linux: how it runs*)*, put the host's address in the server field, enter the
 Desk ID, and click **Connect**.
 
-Both machines must be able to reach that address. On the same LAN they can. Across the
-internet, see *Connecting across networks* below.
+Both machines must be able to reach that address. On the same LAN they can. On different
+networks you do not need an address at all — see *Connecting across networks* below.
 
 > **Windows firewall:** the installer adds an inbound rule (`RemoteDesk Signaling`, TCP
 > 4000-4009) for **private and domain networks only**, since without it other machines cannot
@@ -206,15 +206,46 @@ internet, see *Connecting across networks* below.
 
 ### Connecting across networks
 
-Two peers behind different routers cannot dial each other's private addresses, so the host
-needs a publicly reachable address for signaling:
+**Type the Desk ID and press Connect. That is all.** Every host registers its Desk ID in two
+places: its own embedded server, for the LAN, and the **public relay**, for everywhere else. A
+client asks its own network first and, if the desk is not there, asks the relay — by itself,
+with nothing to configure. The Host tab says **Reachable from anywhere** when this is working.
 
-- **Quick tunnel** — click **Generate Public Cloudflare URL** on the host. This requires
+The relay (`relay/`, a Cloudflare Worker) only introduces the two machines: it carries the few
+kilobytes of the WebRTC handshake. The screen, the mouse and the keyboard still travel directly
+between the two machines, encrypted end to end by WebRTC.
+
+Being on the open internet changes a few rules, and the relay enforces them:
+
+- **A Desk ID belongs to the machine that first registered it.** Each installation has a secret
+  relay key (in its profile, never shown on the network); the relay keeps only its hash and
+  refuses anyone else who tries to register the same ID. Without this, someone who learned your
+  Desk ID could sit in your room and receive your password when you connected. An ID unused for
+  30 days can be claimed again, so a reinstall that lost its key is not locked out forever.
+- **"Anyone with ID" desks stay on their own network.** A six-digit ID is a million guesses
+  from open; the relay refuses such a desk and the Host tab says why. Use *Saved password*,
+  *Ask me first* or *Rotating PIN* to be reachable from other networks.
+- **Nothing is listed.** The relay never reveals which Desk IDs exist, and an address that keeps
+  guessing IDs is throttled.
+
+To run your own relay instead, deploy `relay/` to your Cloudflare account (`cd relay && npm
+install && npx wrangler deploy`) and point the app at it, or turn the relay off, from the
+browser console:
+
+```js
+localStorage.setItem('remotedesk_relay_url', 'https://your-relay.example'); // or 'off'
+```
+
+`npx tsx scripts/check-relay.ts <relay-url>` checks a relay end to end.
+
+Two older routes still work, and are useful for a browser with nothing installed:
+
+- **Quick tunnel** — **Need a web link for a browser with nothing installed?** on the Host tab
+  gives an `https://…trycloudflare.com` address a phone browser can open. This requires
   [`cloudflared`](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
-  on the host's PATH; it is not bundled. The client then uses the printed `https://…` URL as
-  its server address.
-- **A shared relay** — run the standalone signaling relay (below) somewhere both peers can
-  reach, and point both at it.
+  on the host's PATH; it is not bundled.
+- **Tailscale** — with both machines on the same tailnet, the host's `100.x.y.z` address works
+  like a LAN address from anywhere.
 
 Signaling is only half of it. Once the peers have found each other, the **media** still has to
 get through, and that depends on your NAT:
@@ -222,15 +253,24 @@ get through, and that depends on your NAT:
 | Situation | Works? |
 |---|---|
 | Both peers on ordinary home routers | Yes — STUN discovers each peer's public address and they hole-punch a direct path. This is the common case and needs no extra setup. |
-| Either peer behind symmetric NAT or a mobile carrier (CGNAT) | Not without a TURN relay. Hole punching cannot work, and there is no relay configured by default. |
+| Either peer behind symmetric NAT or a mobile carrier (CGNAT), e.g. a laptop on a phone hotspot | Only with TURN. Hole punching cannot work there. |
 
-**There is no TURN server bundled**, deliberately. TURN relays the actual video, so it needs a
-machine with a public IP and real bandwidth. The free public relays that projects like this one
-used to hard-code no longer accept anonymous allocations — shipping credentials that fail is
-worse than shipping none, because it looks like relay coverage exists when it does not.
+**TURN comes from the relay, when it is switched on.** TURN carries the actual video, so it
+costs bandwidth: Cloudflare bills standalone TURN at $0.05 per GB. The relay hands out
+short-lived Cloudflare TURN credentials — only inside the handshake, to a host that proved its
+Desk ID or a client its host admitted — once both secrets are set:
 
-To add your own, run [coturn](https://github.com/coturn/coturn) on any VPS, or use a hosted
-provider, then set it in the browser console on both peers:
+```bash
+cd relay
+npx wrangler secret put TURN_KEY_ID
+npx wrangler secret put TURN_KEY_API_TOKEN
+```
+
+Without them, sessions between ordinary home and office networks still work; only the
+symmetric-NAT case above does not.
+
+To use a TURN server of your own instead, run [coturn](https://github.com/coturn/coturn) on any
+VPS, or use a hosted provider, then set it in the browser console on both peers:
 
 ```js
 localStorage.setItem('remotedesk_ice_servers', JSON.stringify([
@@ -398,6 +438,8 @@ cannot move the host's mouse without the operator's grant.
 | `src/utils/signaling.ts` | The wire protocol, and the client both servers speak to |
 | `src-tauri/src/input.rs` | Input injection and the authorization gate |
 | `src-tauri/src/signaling.rs` | The embedded signaling server |
+| `relay/` | The public relay that lets machines on different networks meet by Desk ID |
+| `src/utils/publicRelay.ts` | Which relay the app uses, and when a client falls back to it |
 | `src-tauri/src/platform.rs` | Per-OS capability reporting |
 | `server/index.ts` | Optional standalone relay (also serves the web client) |
 

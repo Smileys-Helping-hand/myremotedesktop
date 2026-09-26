@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { io, Socket } from '../utils/signaling';
+import { io, Socket, MultiSignalingSocket } from '../utils/signaling';
+import { isPublicRelay, RELAY_KEEPALIVE_MS, RelayStatus } from '../utils/publicRelay';
 import {
   RemoteControlPacket,
   RemoteMouseMovePayload,
@@ -29,6 +30,14 @@ export interface WebRTCOptions {
   onJoinRequest?: (request: JoinRequest) => void;
   onRemoteMouse?: (packet: RemoteMouseMovePayload) => void;
   iceServers?: RTCIceServer[];
+  /**
+   * Hosts only: also register on this public relay, so machines on other
+   * networks can reach this desk by the same Desk ID. `null` keeps the host on
+   * its own server alone.
+   */
+  relayUrl?: string | null;
+  /** Proves to the relay that this machine owns its Desk ID. */
+  relayOwnerKey?: string;
 }
 
 /** A client held at the door, waiting for the host operator's answer. */
@@ -215,6 +224,8 @@ export function useWebRTC(options: WebRTCOptions = {}) {
     clientName,
     onRemoteMouse,
     iceServers = getCustomIceServers(),
+    relayUrl = null,
+    relayOwnerKey,
   } = options;
 
   // State
@@ -234,6 +245,8 @@ export function useWebRTC(options: WebRTCOptions = {}) {
    * during that wait is simply wrong.
    */
   const [isAdmitted, setIsAdmitted] = useState(false);
+  /** Whether machines on other networks can reach this host through the relay. */
+  const [relayStatus, setRelayStatus] = useState<RelayStatus>({ state: relayUrl ? 'connecting' : 'off' });
   const [dataChannelsReady, setDataChannelsReady] = useState<{ mouse: boolean; events: boolean }>({
     mouse: false,
     events: false,
@@ -270,6 +283,14 @@ export function useWebRTC(options: WebRTCOptions = {}) {
   const pinRef = useRef<string | undefined>(initialPin);
   const requireApprovalRef = useRef<boolean>(false);
   const clientNameRef = useRef<string | undefined>(clientName);
+  const relayOwnerKeyRef = useRef<string | undefined>(relayOwnerKey);
+  relayOwnerKeyRef.current = relayOwnerKey;
+  /**
+   * TURN servers the relay handed us for this session, when it has any. They
+   * arrive with the handshake, after the peer connection may already exist, so
+   * they are applied to it before it starts gathering candidates.
+   */
+  const relayIceRef = useRef<RTCIceServer[]>([]);
 
   // Mutable packet counters
   const packetsSentRef = useRef<number>(0);
@@ -479,7 +500,7 @@ export function useWebRTC(options: WebRTCOptions = {}) {
       cleanupPeerConnection();
 
       const pc = new RTCPeerConnection({
-        iceServers,
+        iceServers: [...iceServers, ...relayIceRef.current],
         iceCandidatePoolSize: 4,
       });
       peerConnectionRef.current = pc;
@@ -635,6 +656,28 @@ export function useWebRTC(options: WebRTCOptions = {}) {
     [cleanupPeerConnection, iceServers, sendSignalingMessage, setupDataChannelEvents]
   );
 
+  /**
+   * Adopts TURN servers from the relay. Allowed on an existing connection only
+   * until it starts gathering, which is exactly the window they arrive in: a
+   * client's join verdict comes before the host's offer, and a host learns its
+   * servers when it registers, long before anybody joins.
+   */
+  const adoptRelayIceServers = useCallback(
+    (servers: unknown) => {
+      if (!Array.isArray(servers) || servers.length === 0) return;
+      relayIceRef.current = servers as RTCIceServer[];
+      const pc = peerConnectionRef.current;
+      if (pc && !pc.localDescription && pc.signalingState !== 'closed') {
+        try {
+          pc.setConfiguration({ ...pc.getConfiguration(), iceServers: [...iceServers, ...relayIceRef.current] });
+        } catch (err) {
+          console.warn('[WebRTC] Could not apply relay ICE servers:', err);
+        }
+      }
+    },
+    [iceServers]
+  );
+
   // Helper: Flush queued ICE candidates
   const drainIceCandidates = async (pc: RTCPeerConnection) => {
     while (iceCandidatesQueueRef.current.length > 0) {
@@ -764,12 +807,57 @@ export function useWebRTC(options: WebRTCOptions = {}) {
   // Initialize the signaling connection
   useEffect(() => {
     let socket: Socket | null = null;
+    // A new server means a new connection; the old one's "connected" says
+    // nothing about it.
+    setIsSocketConnected(false);
+    setRelayStatus({ state: relayUrl ? 'connecting' : 'off' });
     try {
-      socket = io(serverUrl, {
+      const home = {
         autoConnect: true,
         reconnectionAttempts: 20,
         reconnectionDelay: 1000,
         timeout: 8000,
+        keepAliveMs: isPublicRelay(serverUrl) ? RELAY_KEEPALIVE_MS : undefined,
+      };
+      socket =
+        relayUrl && initialRole === 'host'
+          ? new MultiSignalingSocket([
+              { label: 'home', url: serverUrl, options: home },
+              {
+                label: 'relay',
+                url: relayUrl,
+                options: {
+                  // A host waits for hours; it must outlive any relay outage.
+                  reconnectionAttempts: Infinity,
+                  reconnectionDelay: 2000,
+                  timeout: 10000,
+                  keepAliveMs: RELAY_KEEPALIVE_MS,
+                },
+                decorate: (event, data) => {
+                  if (event !== 'host:create') return data;
+                  const ownerKey = relayOwnerKeyRef.current;
+                  // Without its key this machine cannot prove the ID is its own.
+                  if (!ownerKey) return null;
+                  return { ...(data as object), ownerKey };
+                },
+              },
+            ])
+          : io(serverUrl, home);
+
+      socket.on('route:connect', ({ via }: { via: string }) => {
+        if (via === 'relay') setRelayStatus({ state: 'connecting' });
+      });
+      socket.on('route:disconnect', ({ via }: { via: string }) => {
+        if (via === 'relay') setRelayStatus({ state: 'connecting' });
+      });
+      socket.on('host:create:result', (res: { ok?: boolean; reason?: string; via?: string; iceServers?: unknown }) => {
+        if (res?.via !== 'relay') return;
+        if (res.ok) {
+          setRelayStatus({ state: 'online' });
+          adoptRelayIceServers(res.iceServers);
+        } else {
+          setRelayStatus({ state: 'refused', reason: res.reason || 'The relay declined this desk' });
+        }
       });
 
       socket.on('connect', () => {
@@ -861,8 +949,9 @@ export function useWebRTC(options: WebRTCOptions = {}) {
       });
 
       // Client receives join verdict
-      socket.on('join:result', (res: { granted: boolean; roomId?: string; hostId?: string; peerId?: string; reason?: string }) => {
+      socket.on('join:result', (res: { granted: boolean; roomId?: string; hostId?: string; peerId?: string; reason?: string; iceServers?: unknown }) => {
         if (res.granted) {
+          adoptRelayIceServers(res.iceServers);
           setJoinError(null);
           setIsAdmitted(true);
           if (res.hostId) {
@@ -896,7 +985,10 @@ export function useWebRTC(options: WebRTCOptions = {}) {
       }
       unsubscribeLocal();
     };
-  }, [handleSignaling, serverUrl]);
+    // relayOwnerKey is read through a ref, so learning it later does not
+    // tear down a live connection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [handleSignaling, serverUrl, relayUrl, adoptRelayIceServers]);
 
   // Join Room Action
   const joinRoom = useCallback(
@@ -1104,6 +1196,7 @@ export function useWebRTC(options: WebRTCOptions = {}) {
     joinRoom,
     registerHost,
     answerJoinRequest,
+    relayStatus,
     isAdmitted,
     leaveRoom,
     severAllConnections,

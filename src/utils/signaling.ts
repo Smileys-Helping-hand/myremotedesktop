@@ -32,6 +32,26 @@ export interface SignalingOptions {
    */
   timeout?: number;
   autoConnect?: boolean;
+  /**
+   * Sends a tiny ping this often while connected. Only the public relay needs
+   * it: a socket that carries nothing for a long time can be dropped by the
+   * networks in between, and a host sits idle for hours waiting to be called.
+   */
+  keepAliveMs?: number;
+}
+
+/**
+ * What `useWebRTC` needs from a signaling connection — satisfied by a single
+ * server's socket and by a host listening on several at once.
+ */
+export interface SignalingTransport {
+  id: string | null;
+  connected: boolean;
+  connect(): void;
+  disconnect(): unknown;
+  on(event: string, handler: (payload: any) => void): unknown;
+  off(event: string, handler?: (payload: any) => void): unknown;
+  emit(event: string, data?: unknown): unknown;
 }
 
 type Listener = (payload: any) => void;
@@ -69,6 +89,7 @@ export class SignalingSocket {
   private closedByUser = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private connectTimer: ReturnType<typeof setTimeout> | null = null;
+  private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
   /** Frames emitted before the socket opened, flushed on connect. */
   private queue: string[] = [];
 
@@ -118,6 +139,7 @@ export class SignalingSocket {
           /* dropped on a racing close; the peer will retry */
         }
       }
+      this.startKeepAlive();
       this.dispatch('connect', undefined);
     };
 
@@ -144,12 +166,35 @@ export class SignalingSocket {
 
     ws.onclose = () => {
       this.clearConnectTimer();
+      this.stopKeepAlive();
       const wasConnected = this.connected;
       this.connected = false;
       this.ws = null;
       if (wasConnected) this.dispatch('disconnect', undefined);
       if (!this.closedByUser) this.scheduleReconnect();
     };
+  }
+
+  private startKeepAlive(): void {
+    this.stopKeepAlive();
+    const every = this.options.keepAliveMs;
+    if (!every) return;
+    this.keepAliveTimer = setInterval(() => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        try {
+          this.ws.send('{"event":"ping","data":null}');
+        } catch {
+          /* onclose follows */
+        }
+      }
+    }, every);
+  }
+
+  private stopKeepAlive(): void {
+    if (this.keepAliveTimer) {
+      clearInterval(this.keepAliveTimer);
+      this.keepAliveTimer = null;
+    }
   }
 
   private clearConnectTimer(): void {
@@ -216,6 +261,7 @@ export class SignalingSocket {
   public disconnect(): this {
     this.closedByUser = true;
     this.clearConnectTimer();
+    this.stopKeepAlive();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -240,4 +286,165 @@ export function io(serverUrl: string, options: SignalingOptions = {}): Signaling
   return new SignalingSocket(toWebSocketUrl(serverUrl), options);
 }
 
-export type Socket = SignalingSocket;
+export type Socket = SignalingTransport;
+
+/** One server a host registers on. */
+export interface SignalingRoute {
+  /** Named in the `via` field of what this server says, e.g. `relay`. */
+  label: string;
+  url: string;
+  options?: SignalingOptions;
+  /** Adjusts a frame bound for this server only; `null` skips it there. */
+  decorate?: (event: string, data: any) => any;
+}
+
+/** Fields that carry a server-assigned peer or request id. */
+const ID_FIELDS = ['fromId', 'senderId', 'peerId', 'hostId', 'requestId', 'targetId'] as const;
+
+/**
+ * A host listening on more than one signaling server at once.
+ *
+ * The host registers its Desk ID on its own embedded server — so the LAN works
+ * with no internet — and on the public relay, so a machine on another network
+ * can reach it by the same ID. `useWebRTC` holds one socket and one peer
+ * connection; this presents several servers as that one socket.
+ *
+ * Each server mints its own peer ids, and two servers can mint the same one,
+ * so ids from every server but the first are prefixed with the route's label
+ * on the way in and stripped on the way out. A frame naming a peer (by
+ * `targetId` or `requestId`) goes only to the server that peer is on; one that
+ * names nobody, like `host:create`, goes to all of them.
+ */
+export class MultiSignalingSocket implements SignalingTransport {
+  public id: string | null = null;
+  private readonly routes: Array<{ route: SignalingRoute; socket: SignalingSocket; prefix: string }>;
+  private readonly listeners = new Map<string, Set<Listener>>();
+  private readonly subscribed = new Set<string>();
+
+  constructor(routes: SignalingRoute[]) {
+    this.routes = routes.map((route, index) => ({
+      route,
+      prefix: index === 0 ? '' : `${route.label}~`,
+      socket: new SignalingSocket(toWebSocketUrl(route.url), { ...route.options, autoConnect: false }),
+    }));
+
+    this.routes.forEach(({ socket, route }, index) => {
+      socket.on('welcome', (data) => {
+        if (index === 0) this.id = data?.peerId ?? this.id;
+      });
+      socket.on('connect', () => {
+        this.dispatch('route:connect', { via: route.label });
+        this.dispatch('connect', { via: route.label });
+      });
+      socket.on('disconnect', () => {
+        this.dispatch('route:disconnect', { via: route.label });
+        if (!this.connected) this.dispatch('disconnect', undefined);
+      });
+    });
+
+    for (const { socket, route } of this.routes) {
+      if (route.options?.autoConnect !== false) socket.connect();
+    }
+  }
+
+  public get connected(): boolean {
+    return this.routes.some(({ socket }) => socket.connected);
+  }
+
+  /** Whether the named server is currently connected. */
+  public isConnected(label: string): boolean {
+    return this.routes.some(({ route, socket }) => route.label === label && socket.connected);
+  }
+
+  public connect(): void {
+    for (const { socket } of this.routes) socket.connect();
+  }
+
+  public disconnect(): this {
+    for (const { socket } of this.routes) socket.disconnect();
+    return this;
+  }
+
+  public on(event: string, handler: Listener): this {
+    let handlers = this.listeners.get(event);
+    if (!handlers) {
+      handlers = new Set();
+      this.listeners.set(event, handlers);
+    }
+    handlers.add(handler);
+    this.subscribe(event);
+    return this;
+  }
+
+  public off(event: string, handler?: Listener): this {
+    if (!handler) this.listeners.delete(event);
+    else this.listeners.get(event)?.delete(handler);
+    return this;
+  }
+
+  public emit(event: string, data?: unknown): this {
+    const named = this.namedPeer(data);
+    for (const { socket, route, prefix } of this.routes) {
+      let payload: any = data;
+      if (named !== null) {
+        const onThisServer = prefix ? named.startsWith(prefix) : !this.hasAnyPrefix(named);
+        if (!onThisServer) continue;
+        payload = this.rewriteIds(data, (id) => (prefix && id.startsWith(prefix) ? id.slice(prefix.length) : id));
+      }
+      if (route.decorate) {
+        payload = route.decorate(event, payload);
+        if (payload === null) continue;
+      }
+      socket.emit(event, payload);
+    }
+    return this;
+  }
+
+  /** Lifecycle events are wired in the constructor; everything else lazily. */
+  private subscribe(event: string): void {
+    if (this.subscribed.has(event)) return;
+    if (['connect', 'disconnect', 'route:connect', 'route:disconnect'].includes(event)) return;
+    this.subscribed.add(event);
+    for (const { socket, prefix, route } of this.routes) {
+      socket.on(event, (payload: any) => {
+        let data = prefix ? this.rewriteIds(payload, (id) => `${prefix}${id}`) : payload;
+        if (data && typeof data === 'object' && !Array.isArray(data)) data = { ...data, via: route.label };
+        this.dispatch(event, data);
+      });
+    }
+  }
+
+  private namedPeer(data: unknown): string | null {
+    if (!data || typeof data !== 'object') return null;
+    const record = data as Record<string, unknown>;
+    if (typeof record.targetId === 'string' && record.targetId) return record.targetId;
+    if (typeof record.requestId === 'string' && record.requestId) return record.requestId;
+    return null;
+  }
+
+  private hasAnyPrefix(id: string): boolean {
+    return this.routes.some(({ prefix }) => prefix !== '' && id.startsWith(prefix));
+  }
+
+  private rewriteIds(data: unknown, map: (id: string) => string): unknown {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return data;
+    const copy: Record<string, unknown> = { ...(data as Record<string, unknown>) };
+    for (const field of ID_FIELDS) {
+      if (typeof copy[field] === 'string' && copy[field]) copy[field] = map(copy[field] as string);
+    }
+    return copy;
+  }
+
+  private dispatch(event: string, payload: unknown): void {
+    const handlers = this.listeners.get(event);
+    if (!handlers) return;
+    for (const handler of [...handlers]) {
+      try {
+        handler(payload);
+      } catch (err) {
+        console.warn(`[signaling] listener for "${event}" threw:`, err);
+      }
+    }
+  }
+}
+

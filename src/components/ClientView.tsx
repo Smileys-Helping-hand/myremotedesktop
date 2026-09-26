@@ -50,6 +50,7 @@ import {
 } from '../utils/hostDiscovery';
 import { deviceKey, saveDevice, touchDevice } from '../utils/deviceBook';
 import { loadProfile } from '../utils/machineProfile';
+import { getPublicRelayUrl, isPublicRelay, shouldTryRelay } from '../utils/publicRelay';
 
 /** A device the operator picked in the device book, to connect to now. */
 export interface ClientConnectRequest {
@@ -130,6 +131,13 @@ export const ClientView: React.FC<ClientViewProps> = ({
   const [dialing, setDialing] = useState<{ request: ClientConnectRequest; index: number } | null>(
     null
   );
+  /**
+   * The desk the relay has already been tried for, so a desk that is not on
+   * the relay either is reported once instead of retried forever.
+   */
+  const relayTriedRef = useRef<string | null>(null);
+  /** What to call the machine being reached, in messages about it. */
+  const targetNameRef = useRef<string | null>(null);
   /** This machine's name, which the host is shown when we knock. */
   const [myName, setMyName] = useState<string | null>(null);
 
@@ -360,6 +368,8 @@ export const ClientView: React.FC<ClientViewProps> = ({
    */
   useEffect(() => {
     if (!connectRequest || connectRequest.addresses.length === 0) return;
+    relayTriedRef.current = null;
+    targetNameRef.current = connectRequest.name;
     const first = connectRequest.addresses[0];
     setRoomIdInput(connectRequest.deskId);
     setPinInput(connectRequest.pin ?? '');
@@ -395,7 +405,9 @@ export const ClientView: React.FC<ClientViewProps> = ({
       if (next < dialing.request.addresses.length) {
         const address = dialing.request.addresses[next];
         setServerUrlInput(address);
-        localStorage.setItem('remotedesk_signal_url', address);
+        // The relay is a fallback, not a default: saving it would send every
+        // later connection over the internet, even to a machine in the room.
+        if (!isPublicRelay(address)) localStorage.setItem('remotedesk_signal_url', address);
         setDialing({ request: dialing.request, index: next });
         showToast({
           title: `Trying ${dialing.request.name} elsewhere`,
@@ -405,6 +417,9 @@ export const ClientView: React.FC<ClientViewProps> = ({
         });
       } else {
         setDialing(null);
+        // Every saved address is somewhere the machine used to be; the relay
+        // finds it wherever it is now.
+        if (tryRelay()) return;
         showToast({
           title: `Could not reach ${dialing.request.name}`,
           description:
@@ -417,6 +432,53 @@ export const ClientView: React.FC<ClientViewProps> = ({
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dialing, isSocketConnected, serverUrlInput]);
+
+  /**
+   * Looks for the desk on the public relay instead.
+   *
+   * Every address we know is a local one, so "no host is sharing that Desk ID"
+   * or an address that never answers usually just means the other machine is
+   * on a different network. The host registers on the relay too, so the same
+   * Desk ID finds it there — no address, no tunnel, nothing to set up.
+   */
+  const tryRelay = useCallback((): boolean => {
+    const relay = getPublicRelayUrl();
+    const deskId = roomIdInput.replace(/\s+/g, '').trim();
+    if (!relay || !deskId || isPublicRelay(serverUrlInput) || relayTriedRef.current === deskId) {
+      return false;
+    }
+    relayTriedRef.current = deskId;
+    const name = targetNameRef.current || `Desk ${deskId}`;
+
+    leaveRoom();
+    setServerUrlInput(relay);
+    setDialing({
+      request: { name, deskId, addresses: [relay], pin: pinInput, nonce: Date.now() },
+      index: 0,
+    });
+    showToast({
+      title: `${name} is not on this network`,
+      description: 'Looking for it over the internet instead.',
+      type: 'info',
+      duration: 4000,
+    });
+    return true;
+  }, [leaveRoom, pinInput, roomIdInput, serverUrlInput, showToast]);
+
+  // The server we asked has never heard of this desk: try the relay.
+  useEffect(() => {
+    if (!isJoined || dialing || !shouldTryRelay(joinError)) return;
+    tryRelay();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [joinError, isJoined]);
+
+  // The server we asked never answered at all: try the relay.
+  useEffect(() => {
+    if (!isJoined || isSocketConnected || dialing || isPublicRelay(serverUrlInput)) return;
+    const timer = setTimeout(() => tryRelay(), ADDRESS_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isJoined, isSocketConnected, dialing, serverUrlInput]);
 
   /** Joins the desk a saved device names, once its server is reachable. */
   const connectNow = async (request: ClientConnectRequest) => {
@@ -434,6 +496,8 @@ export const ClientView: React.FC<ClientViewProps> = ({
 
   const handleJoin = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
+    relayTriedRef.current = null;
+    targetNameRef.current = null;
     let cleanRoomId = roomIdInput.replace(/\s+/g, '').trim();
     let currentServer = serverUrlInput.trim();
 
@@ -745,7 +809,16 @@ export const ClientView: React.FC<ClientViewProps> = ({
         <div className="bg-amber-950/80 border border-amber-500/80 rounded-2xl p-4 shadow-lg backdrop-blur-xl flex items-center justify-between gap-3 animate-fadeIn">
           <div className="flex items-center gap-2.5 text-xs text-amber-200 font-mono">
             <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
-            <span>Connection Warning: {joinError}</span>
+            <span>
+              Connection Warning: {joinError}
+              {isPublicRelay(serverUrlInput) && shouldTryRelay(joinError) && (
+                <span className="block mt-1 text-amber-300/80">
+                  Checked this network and the internet. Make sure RemoteDesk is open on that
+                  machine and its Host tab says "Reachable from anywhere" — a desk set to "Anyone
+                  with ID" can only be reached on its own network.
+                </span>
+              )}
+            </span>
           </div>
           <button
             onClick={() => handleJoin()}

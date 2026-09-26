@@ -1,0 +1,31 @@
+# RemoteDesk public relay.
+#
+# One Durable Object holds every signaling socket, the same shape as the
+# standalone Node relay in ../server/index.ts. Signaling is a few kilobytes per
+# session, so a single object has room for far more machines than this will
+# ever see; the video never passes through here.
+name = "remotedesk-relay"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+
+# The address compiled into the app as DEFAULT_PUBLIC_RELAY_URL
+# (src/utils/publicRelay.ts). Changing it strands every installed copy that
+# still points here, so treat it as permanent.
+routes = [{ pattern = "relay.savestate.co.za", custom_domain = true }]
+workers_dev = false
+
+[[durable_objects.bindings]]
+name = "HUB"
+class_name = "RelayHub"
+
+# SQLite-backed, which is what the Workers Free plan provides.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RelayHub"]
+
+# Optional TURN relay for peers behind mobile carriers or symmetric NAT, where
+# a direct path cannot be punched. Cloudflare bills standalone TURN per GB, so
+# it is off unless both secrets are set:
+#
+#   npx wrangler secret put TURN_KEY_ID
+#   npx wrangler secret put TURN_KEY_API_TOKEN
