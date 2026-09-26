@@ -43,6 +43,19 @@ interface DevicesViewProps {
   onConnect: (target: ConnectTarget) => void;
 }
 
+/**
+ * Whether a machine is too old to introduce itself.
+ *
+ * Builds before 1.1.4 publish neither a name nor a Desk ID, so they turn up in
+ * the list as a bare address with nothing to click — indistinguishable, without
+ * this, from a machine that is merely keeping its ID private. The two need
+ * opposite things from the operator: one needs updating, the other needs its ID
+ * typed.
+ */
+function isOlderBuild(host: DiscoveredHost): boolean {
+  return host.name === null && host.desks.length === 0;
+}
+
 /** How often the open tab looks around again. */
 const NEARBY_REFRESH_MS = 20000;
 
@@ -244,8 +257,8 @@ export const DevicesView: React.FC<DevicesViewProps> = ({ onConnect }) => {
   const handleConnectFound = async (host: DiscoveredHost) => {
     const deskId = autofillDeskId(host);
     if (!deskId) {
-      // The other machine is deliberately not publishing its Desk ID — that is
-      // what an open desk with no password does — so it has to be typed.
+      // No Desk ID to join with. Two very different reasons, and the operator
+      // can only act on one of them if we say which it is.
       setDraft({
         id: deviceKey('', [host.origin]),
         name: hostLabel(host),
@@ -253,13 +266,23 @@ export const DevicesView: React.FC<DevicesViewProps> = ({ onConnect }) => {
         addresses: [host.origin],
         pin: '',
       });
-      showToast({
-        title: `${hostLabel(host)} did not publish its Desk ID`,
-        description:
-          'That machine is set to admit anyone who knows its ID, so it keeps the ID off the network. Read it off that screen and paste it here.',
-        type: 'info',
-        duration: 8000,
-      });
+      showToast(
+        isOlderBuild(host)
+          ? {
+              title: `${hostLabel(host)} is running an older RemoteDesk`,
+              description:
+                'Versions before 1.1.4 do not publish their name or Desk ID, so there is nothing here to click. Update that machine and it will appear by name, ready to join. For now, read its 6-digit Desk ID off its screen and type it here.',
+              type: 'warning',
+              duration: 12000,
+            }
+          : {
+              title: `${hostLabel(host)} keeps its Desk ID private`,
+              description:
+                'That machine admits anyone who knows its ID, so it deliberately keeps the ID off the network. Read it off that screen and type it here.',
+              type: 'info',
+              duration: 9000,
+            }
+      );
       return;
     }
 
@@ -377,6 +400,9 @@ export const DevicesView: React.FC<DevicesViewProps> = ({ onConnect }) => {
                     {deskId && ` · Desk ${deskId}`}
                     {!sharing && ' · not sharing yet'}
                     {known && ' · saved'}
+                    {isOlderBuild(host) && (
+                      <span className="text-amber-300"> · older version, update it to join</span>
+                    )}
                   </div>
                 </div>
                 <button
