@@ -109,6 +109,17 @@
         </a>
       </div>
 
+      <div style="margin-top: 14px; padding: 14px 18px; background: rgba(34, 211, 238, 0.07); border: 1px solid var(--edge); border-radius: 14px; font-size: 13.5px; color: var(--dim); line-height: 1.6;">
+        <strong style="color: var(--cyan); font-size: 14px;">🐧 Linux Laptop Launch Help:</strong><br />
+        • <b>AppImage not opening?</b> Linux downloads require the execute permission. Run in terminal:
+        <code style="display: inline-block; margin: 4px 0;">chmod +x RemoteDesk_1.2.0_amd64.AppImage &amp;&amp; ./RemoteDesk_1.2.0_amd64.AppImage</code><br />
+        • On <b>Ubuntu 24.04 / 22.04</b>, if prompted for FUSE, either run with:
+        <code style="display: inline-block; margin: 4px 0;">./RemoteDesk_1.2.0_amd64.AppImage --appimage-extract-and-run</code>
+        or install FUSE via <code>sudo apt install -y libfuse2</code>.<br />
+        • Or install the native Debian package: <code>sudo dpkg -i RemoteDesk_1.2.0_amd64.deb</code>.<br />
+        • Or play instantly without installing: launch the <a href="/app/" style="color: var(--cyan); font-weight: 700; text-decoration: underline;">Web Version below</a> directly in Chrome, Firefox, or Edge!
+      </div>
+
       <h2>How it works</h2>
       <ol class="steps">
         <li>
@@ -131,12 +142,11 @@
         </li>
       </ol>
 
-      <h2>No computer to install on?</h2>
-      <p style="color: var(--dim); margin: 0">
-        Open the web version in a browser instead. It can see and control a computer that is running
-        the app — it just cannot share <em>its own</em> screen.
+      <h2>🎮 Zero-Install Web App &amp; Co-Op Gaming</h2>
+      <p style="color: var(--dim); margin: 0 0 14px">
+        Want to play games right now using your Linux laptop as Player 2 controller, or control your remote computer with zero installation? Open the web version directly in any modern browser (Chrome, Edge, Firefox, Brave). Includes the full <b>Gaming &amp; Co-Op Deck</b> with interactive virtual controller, physical gamepad passthrough, low-latency audio, and mouse pointer lock!
       </p>
-      <a class="web-app" href="/app/">Open the web version</a>
+      <a class="web-app" href="/app/" style="font-size: 16px; padding: 14px 26px;">🎮 Open Web App &amp; Gaming Deck</a>
 
       <h2>Good to know</h2>
       <div class="row">

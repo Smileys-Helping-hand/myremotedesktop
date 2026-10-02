@@ -12,7 +12,7 @@
 // the page, before it ever reached the network, and looked to the app exactly
 // like a machine that was not there. LAN discovery could not work at all.
 
-const CACHE_NAME = 'remotedesk-v2';
+const CACHE_NAME = 'remotedesk-v3-gaming';
 
 /** Live endpoints: always the network, never this worker. */
 const LIVE_PATHS = new Set([

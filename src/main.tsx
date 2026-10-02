@@ -67,7 +67,9 @@ async function boot() {
 function registerServiceWorker() {
   if (isTauri() || !('serviceWorker' in navigator)) return;
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').catch((err) => {
+    const base = import.meta.env.BASE_URL || '/';
+    const swPath = `${base.replace(/\/+$/, '')}/sw.js`;
+    navigator.serviceWorker.register(swPath).catch((err) => {
       console.debug('ServiceWorker registration skipped:', err);
     });
   });
