@@ -36,9 +36,19 @@ pub fn code_to_key(code: &str) -> Option<Key> {
     // Numpad digits: `Numpad0`..`Numpad9`
     if let Some(digit) = code.strip_prefix("Numpad") {
         if let Ok(n) = digit.parse::<u8>() {
-            if n <= 9 {
-                return Some(Key::Unicode((b'0' + n) as char));
-            }
+            return match n {
+                0 => Some(Key::Numpad0),
+                1 => Some(Key::Numpad1),
+                2 => Some(Key::Numpad2),
+                3 => Some(Key::Numpad3),
+                4 => Some(Key::Numpad4),
+                5 => Some(Key::Numpad5),
+                6 => Some(Key::Numpad6),
+                7 => Some(Key::Numpad7),
+                8 => Some(Key::Numpad8),
+                9 => Some(Key::Numpad9),
+                _ => None,
+            };
         }
     }
 
@@ -75,14 +85,14 @@ pub fn code_to_key(code: &str) -> Option<Key> {
         "MetaLeft" | "MetaRight" => Key::Meta,
         "CapsLock" => Key::CapsLock,
 
-        // Punctuation — unshifted glyph; the remote peer sends the Shift key
-        // separately, so the OS applies the shifted variant itself.
-        "Minus" | "NumpadSubtract" => Key::Unicode('-'),
+        // Punctuation and Numpad math operators
+        "Minus" => Key::Unicode('-'),
+        "NumpadSubtract" => Key::Subtract,
         "Equal" => Key::Unicode('='),
-        "NumpadAdd" => Key::Unicode('+'),
-        "NumpadMultiply" => Key::Unicode('*'),
-        "NumpadDivide" => Key::Unicode('/'),
-        "NumpadDecimal" => Key::Unicode('.'),
+        "NumpadAdd" => Key::Add,
+        "NumpadMultiply" => Key::Multiply,
+        "NumpadDivide" => Key::Divide,
+        "NumpadDecimal" => Key::Decimal,
         "BracketLeft" => Key::Unicode('['),
         "BracketRight" => Key::Unicode(']'),
         "Backslash" => Key::Unicode('\\'),
@@ -128,7 +138,7 @@ mod tests {
     #[test]
     fn maps_digits_from_both_rows() {
         assert!(matches!(code_to_key("Digit7"), Some(Key::Unicode('7'))));
-        assert!(matches!(code_to_key("Numpad7"), Some(Key::Unicode('7'))));
+        assert!(matches!(code_to_key("Numpad7"), Some(Key::Numpad7)));
     }
 
     #[test]

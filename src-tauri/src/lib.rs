@@ -13,6 +13,7 @@ mod profile;
 mod signaling;
 mod tunnel;
 mod updates;
+mod vigem;
 
 use std::sync::Arc;
 use std::thread;
@@ -35,6 +36,7 @@ pub struct AppState {
     /// `None` when the embedded signaling server could not bind a port; the app
     /// still runs and can join a session hosted elsewhere.
     pub signaling: Option<signaling::SignalingHandle>,
+    pub vigem: Arc<vigem::VigemState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +145,11 @@ fn get_injection_status(state: State<'_, AppState>) -> InjectionStatus {
 #[tauri::command]
 fn inject_mouse_move(state: State<'_, AppState>, norm_x: f64, norm_y: f64) -> Result<(), String> {
     state.input.move_mouse(norm_x, norm_y)
+}
+
+#[tauri::command]
+fn inject_mouse_relative(state: State<'_, AppState>, dx: i32, dy: i32) -> Result<(), String> {
+    state.input.move_mouse_relative(dx, dy)
 }
 
 #[tauri::command]
@@ -353,6 +360,26 @@ async fn install_found_update(app: AppHandle, pending: State<'_, PendingUpdate>)
         .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+#[tauri::command]
+fn vigem_status(state: State<'_, AppState>) -> vigem::VigemStatus {
+    state.vigem.status()
+}
+
+#[tauri::command]
+fn vigem_plugin(state: State<'_, AppState>) -> Result<(), String> {
+    state.vigem.plugin()
+}
+
+#[tauri::command]
+fn vigem_unplug(state: State<'_, AppState>) -> Result<(), String> {
+    state.vigem.unplug()
+}
+
+#[tauri::command]
+fn vigem_update_x360(state: State<'_, AppState>, report: vigem::X360Report) -> Result<(), String> {
+    state.vigem.update(report)
 }
 
 /// Whether this installation can replace itself, and if not, why not.
@@ -654,6 +681,7 @@ fn install_control_handler(app: &AppHandle) {
     signaling.set_control_handler(Box::new(move |cmd: &str, args: Value| {
         let state = app.state::<AppState>();
         let input = &state.input;
+        let vigem = &state.vigem;
 
         /// Reads a required field, naming the command in the error.
         fn field<'a>(args: &'a Value, key: &str) -> Result<&'a Value, String> {
@@ -709,6 +737,12 @@ fn install_control_handler(app: &AppHandle) {
                 input.move_mouse(num(&args, "normX")?, num(&args, "normY")?)?;
                 Ok(Value::Null)
             }
+            "inject_mouse_relative" => {
+                let dx = num(&args, "dx")? as i32;
+                let dy = num(&args, "dy")? as i32;
+                input.move_mouse_relative(dx, dy)?;
+                Ok(Value::Null)
+            }
             "inject_mouse_button" => {
                 let button = text(&args, "button")?;
                 let pressed = flag(&args, "pressed")?;
@@ -754,6 +788,23 @@ fn install_control_handler(app: &AppHandle) {
                     .write_text(text(&args, "text")?)
                     .map_err(|e| format!("clipboard write failed: {e}"))?;
                 Ok(Value::Bool(true))
+            }
+            "vigem_status" => {
+                serde_json::to_value(vigem.status()).map_err(|e| e.to_string())
+            }
+            "vigem_plugin" => {
+                vigem.plugin()?;
+                Ok(Value::Null)
+            }
+            "vigem_unplug" => {
+                vigem.unplug()?;
+                Ok(Value::Null)
+            }
+            "vigem_update_x360" => {
+                let report: vigem::X360Report = serde_json::from_value(field(&args, "report")?.clone())
+                    .map_err(|e| format!("invalid x360 report: {e}"))?;
+                vigem.update(report)?;
+                Ok(Value::Null)
             }
             other => Err(format!("unknown control command: {other}")),
         }
@@ -855,6 +906,7 @@ fn open_session_in_browser() -> Result<String, String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let input_state = Arc::new(InputState::new());
+    let vigem_state = Arc::new(vigem::VigemState::new());
 
     // Started before the window so the frontend's first connection attempt
     // already has somewhere to land.
@@ -874,7 +926,11 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .manage(AppState { input: Arc::clone(&input_state), signaling })
+        .manage(AppState {
+            input: Arc::clone(&input_state),
+            signaling,
+            vigem: Arc::clone(&vigem_state),
+        })
         .manage(PendingUpdate::default())
         .setup({
             let input_state = Arc::clone(&input_state);
@@ -932,10 +988,15 @@ pub fn run() {
             set_kill_switch_armed,
             get_injection_status,
             inject_mouse_move,
+            inject_mouse_relative,
             inject_mouse_button,
             inject_mouse_wheel,
             inject_key,
             panic_revoke,
+            vigem_status,
+            vigem_plugin,
+            vigem_unplug,
+            vigem_update_x360,
             system_diagnostics,
             firewall_status,
             update_capability,

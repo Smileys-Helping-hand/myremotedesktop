@@ -35,13 +35,19 @@ import {
   tauriSetTargetDisplay,
   tauriSetControlEnabled,
   tauriInjectMouseMove,
+  tauriInjectMouseRelative,
   tauriInjectMouseButton,
   tauriInjectMouseWheel,
   tauriInjectKey,
   tauriPanicRevoke,
   tauriFirewallStatus,
+  tauriVigemStatus,
+  tauriVigemPlugin,
+  tauriVigemUnplug,
+  tauriVigemUpdateX360,
 } from '../utils/tauriBridge';
 import { canControlHost, isBrowserHostSession } from '../utils/hostControl';
+import { HostPlayer2Dispatcher, gamepadStateToX360Report } from '../utils/gamepadManager';
 import { FileTransferModal } from './FileTransferModal';
 import { StreamControls } from './StreamControls';
 import { AnnotationCanvas } from './AnnotationCanvas';
@@ -185,6 +191,8 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
   const [isStartingTunnel, setIsStartingTunnel] = useState<boolean>(false);
 
   const videoPreviewRef = useRef<HTMLVideoElement | null>(null);
+  const hostPlayer2DispatcherRef = useRef<HostPlayer2Dispatcher>(new HostPlayer2Dispatcher());
+  const vigemActiveRef = useRef<boolean>(false);
 
   // Fetch LAN & Tunnel endpoints from signaling server
   useEffect(() => {
@@ -254,6 +262,28 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
     }
   }, []);
 
+  // Probe and activate ViGEm Xbox 360 controller emulation if available on host
+  useEffect(() => {
+    let cancelled = false;
+    tauriVigemStatus().then((status) => {
+      if (cancelled || !status) return;
+      if (status.supported && status.driverInstalled) {
+        tauriVigemPlugin().then((ok) => {
+          if (!cancelled && ok) {
+            vigemActiveRef.current = true;
+          }
+        });
+      }
+    });
+    return () => {
+      cancelled = true;
+      if (vigemActiveRef.current) {
+        tauriVigemUnplug().catch(() => {});
+        vigemActiveRef.current = false;
+      }
+    };
+  }, []);
+
   // WebRTC Hook Integration
   const {
     isConnected,
@@ -288,6 +318,20 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
       if (killSwitchActive) return;
       if (canControlHost()) {
         tauriInjectMouseMove(mouse.normX, mouse.normY);
+      }
+    },
+    onRemoteMouseRelative: (rel) => {
+      if (killSwitchActive) return;
+      if (canControlHost()) {
+        tauriInjectMouseRelative(rel.dx, rel.dy);
+      }
+    },
+    onRemoteGamepad: (gp) => {
+      if (killSwitchActive) return;
+      if (vigemActiveRef.current) {
+        tauriVigemUpdateX360(gamepadStateToX360Report(gp));
+      } else {
+        hostPlayer2DispatcherRef.current.dispatch(gp);
       }
     },
   });
@@ -396,6 +440,22 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
         return;
       }
 
+      if (packet.type === 'GAMEPAD_STATE') {
+        if (vigemActiveRef.current) {
+          tauriVigemUpdateX360(gamepadStateToX360Report(packet));
+        } else {
+          hostPlayer2DispatcherRef.current.dispatch(packet);
+        }
+        return;
+      }
+
+      if (packet.type === 'MOUSE_RELATIVE') {
+        if (canControlHost()) {
+          tauriInjectMouseRelative(packet.dx, packet.dy);
+        }
+        return;
+      }
+
       // Native Input Injection via Tauri Rust Engine
       if (packet.type === 'MOUSE_MOVE') {
         if (canControlHost()) {
@@ -464,10 +524,24 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
       // preference, so no picker appears and single windows cannot be shared
       // at all. Leaving it out is what puts the choice of screen, window or
       // tab back in front of the person sharing.
-      stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: { ideal: 60, max: 60 } },
-        audio: false,
-      });
+      try {
+        stream = await navigator.mediaDevices.getDisplayMedia({
+          video: { frameRate: { ideal: 60, max: 60 } },
+          audio: {
+            autoGainControl: false,
+            echoCancellation: false,
+            noiseSuppression: false,
+          },
+        });
+      } catch (audioErr) {
+        if (audioErr instanceof DOMException && audioErr.name === 'NotAllowedError') {
+          throw audioErr;
+        }
+        stream = await navigator.mediaDevices.getDisplayMedia({
+          video: { frameRate: { ideal: 60, max: 60 } },
+          audio: false,
+        });
+      }
     } catch (err) {
       // Dismissing the picker lands here too, which is not an error worth
       // shouting about — but it must not start a broadcast either.

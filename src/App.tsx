@@ -25,6 +25,9 @@ const ProtocolInspector = lazy(() =>
 const SecurityKillSwitchDemo = lazy(() =>
   import('./components/SecurityKillSwitchDemo').then((m) => ({ default: m.SecurityKillSwitchDemo }))
 );
+const GamingDeck = lazy(() =>
+  import('./components/GamingDeck').then((m) => ({ default: m.GamingDeck }))
+);
 
 function TabLoading() {
   return (
@@ -105,6 +108,9 @@ export default function App() {
                   connectRequest={clientRequest}
                   onSwitchToHost={handleSwitchToHost}
                 />
+              )}
+              {activeTab === 'gaming' && (
+                <GamingDeck initialRoomId={sharedRoomId} initialPin={sharedPin} />
               )}
               {activeTab === 'downloads' && <DownloadsView />}
               {activeTab === 'sandbox' && <CoordinateSandbox />}

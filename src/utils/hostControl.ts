@@ -29,12 +29,17 @@ export type HostCommand =
   | 'set_control_enabled'
   | 'get_injection_status'
   | 'inject_mouse_move'
+  | 'inject_mouse_relative'
   | 'inject_mouse_button'
   | 'inject_mouse_wheel'
   | 'inject_key'
   | 'panic_revoke'
   | 'clipboard_read'
-  | 'clipboard_write';
+  | 'clipboard_write'
+  | 'vigem_status'
+  | 'vigem_plugin'
+  | 'vigem_unplug'
+  | 'vigem_update_x360';
 
 let controlToken: string | null = null;
 let socket: WebSocket | null = null;
