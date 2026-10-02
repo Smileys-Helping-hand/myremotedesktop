@@ -16,6 +16,7 @@ import {
   Laptop,
   Globe,
   Loader2,
+  RefreshCw,
 } from 'lucide-react';
 import { useWebRTC, getHostSignalUrl } from '../hooks/useWebRTC';
 import {
@@ -33,13 +34,19 @@ import {
   tauriSetTargetDisplay,
   tauriSetControlEnabled,
   tauriInjectMouseMove,
+  tauriInjectMouseRelative,
   tauriInjectMouseButton,
   tauriInjectMouseWheel,
   tauriInjectKey,
   tauriPanicRevoke,
   tauriFirewallStatus,
+  tauriVigemStatus,
+  tauriVigemPlugin,
+  tauriVigemUnplug,
+  tauriVigemUpdateX360,
 } from '../utils/tauriBridge';
 import { canControlHost, isBrowserHostSession } from '../utils/hostControl';
+import { HostPlayer2Dispatcher, gamepadStateToX360Report } from '../utils/gamepadManager';
 import { FileTransferModal } from './FileTransferModal';
 import { StreamControls } from './StreamControls';
 import { AnnotationCanvas } from './AnnotationCanvas';
@@ -72,10 +79,18 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
   const [activeStream, setActiveStream] = useState<MediaStream | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
 
-  // Room ID (6-digit format like AnyDesk)
-  const [roomId] = useState<string>(() =>
-    Math.floor(100000 + Math.random() * 900000).toString()
-  );
+  // Room ID (6-digit format like AnyDesk, persisted across reloads)
+  const [roomId, setRoomId] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('remotedesk_host_room_id');
+      if (saved && /^\d{6}$/.test(saved)) return saved;
+    }
+    const generated = Math.floor(100000 + Math.random() * 900000).toString();
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('remotedesk_host_room_id', generated);
+    }
+    return generated;
+  });
   const [copiedRoom, setCopiedRoom] = useState(false);
   const [copiedPin, setCopiedPin] = useState(false);
 
@@ -114,6 +129,8 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
   const [isStartingTunnel, setIsStartingTunnel] = useState<boolean>(false);
 
   const videoPreviewRef = useRef<HTMLVideoElement | null>(null);
+  const hostPlayer2DispatcherRef = useRef<HostPlayer2Dispatcher>(new HostPlayer2Dispatcher());
+  const vigemActiveRef = useRef<boolean>(false);
 
   // Fetch LAN & Tunnel endpoints from signaling server
   useEffect(() => {
@@ -183,6 +200,28 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
     }
   }, []);
 
+  // Probe and activate ViGEm Xbox 360 controller emulation if available on host
+  useEffect(() => {
+    let cancelled = false;
+    tauriVigemStatus().then((status) => {
+      if (cancelled || !status) return;
+      if (status.supported && status.driverInstalled) {
+        tauriVigemPlugin().then((ok) => {
+          if (!cancelled && ok) {
+            vigemActiveRef.current = true;
+          }
+        });
+      }
+    });
+    return () => {
+      cancelled = true;
+      if (vigemActiveRef.current) {
+        tauriVigemUnplug().catch(() => {});
+        vigemActiveRef.current = false;
+      }
+    };
+  }, []);
+
   // WebRTC Hook Integration
   const {
     isConnected,
@@ -207,6 +246,20 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
       if (killSwitchActive) return;
       if (canControlHost()) {
         tauriInjectMouseMove(mouse.normX, mouse.normY);
+      }
+    },
+    onRemoteMouseRelative: (rel) => {
+      if (killSwitchActive) return;
+      if (canControlHost()) {
+        tauriInjectMouseRelative(rel.dx, rel.dy);
+      }
+    },
+    onRemoteGamepad: (gp) => {
+      if (killSwitchActive) return;
+      if (vigemActiveRef.current) {
+        tauriVigemUpdateX360(gamepadStateToX360Report(gp));
+      } else {
+        hostPlayer2DispatcherRef.current.dispatch(gp);
       }
     },
   });
@@ -300,6 +353,22 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
         return;
       }
 
+      if (packet.type === 'GAMEPAD_STATE') {
+        if (vigemActiveRef.current) {
+          tauriVigemUpdateX360(gamepadStateToX360Report(packet));
+        } else {
+          hostPlayer2DispatcherRef.current.dispatch(packet);
+        }
+        return;
+      }
+
+      if (packet.type === 'MOUSE_RELATIVE') {
+        if (canControlHost()) {
+          tauriInjectMouseRelative(packet.dx, packet.dy);
+        }
+        return;
+      }
+
       // Native Input Injection via Tauri Rust Engine
       if (packet.type === 'MOUSE_MOVE') {
         if (canControlHost()) {
@@ -368,7 +437,11 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
           frameRate: { ideal: 60, max: 60 },
           displaySurface: 'monitor',
         },
-        audio: false,
+        audio: {
+          autoGainControl: false,
+          echoCancellation: false,
+          noiseSuppression: false,
+        },
       });
     } catch (err) {
       // Dismissing the picker lands here too, which is not an error worth
@@ -460,6 +533,21 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
       duration: 3000,
     });
     setTimeout(() => setCopiedRoom(false), 2000);
+  };
+
+  // Generate a fresh Desk ID on demand
+  const handleRegenerateRoomId = () => {
+    const generated = Math.floor(100000 + Math.random() * 900000).toString();
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('remotedesk_host_room_id', generated);
+    }
+    setRoomId(generated);
+    showToast({
+      title: 'New Desk ID Generated',
+      description: `Desk ID updated to ${generated}`,
+      type: 'info',
+      duration: 3000,
+    });
   };
 
   // Copy Full 1-Click Connection Link (Server URL + Desk ID)
@@ -590,6 +678,14 @@ export const HostView: React.FC<HostViewProps> = ({ onSwitchToClient }) => {
                   title="Copy 6-Digit Desk ID"
                 >
                   {copiedRoom ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                </button>
+                <button
+                  id="regenerate-room-id-button"
+                  onClick={handleRegenerateRoomId}
+                  className="p-2 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/40 text-cyan-300 hover:text-cyan-200 transition-colors"
+                  title="Generate New Desk ID"
+                >
+                  <RefreshCw className="w-4 h-4" />
                 </button>
                 <button
                   id="copy-full-link-button"

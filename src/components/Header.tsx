@@ -1,9 +1,10 @@
 import React from 'react';
-import { Monitor, Cpu, Shield, Code, Layers, Radio, MousePointer, Download } from 'lucide-react';
+import { Monitor, Cpu, Shield, Code, Layers, Radio, MousePointer, Download, Gamepad2 } from 'lucide-react';
 
 export type ActiveTab =
   | 'host'
   | 'client'
+  | 'gaming'
   | 'downloads'
   | 'sandbox'
   | 'protocol'
@@ -28,6 +29,12 @@ export const Header: React.FC<HeaderProps> = ({ activeTab, setActiveTab }) => {
       label: 'Client (Remote Control)',
       icon: MousePointer,
       badge: 'Phase 2',
+    },
+    {
+      id: 'gaming' as ActiveTab,
+      label: 'Gaming & Co-op',
+      icon: Gamepad2,
+      badge: 'Zero-Lag',
     },
     {
       id: 'downloads' as ActiveTab,

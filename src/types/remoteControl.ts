@@ -62,6 +62,61 @@ export interface RemoteMouseWheelPayload {
   timestamp: number;
 }
 
+export interface RemoteMouseRelativePayload {
+  type: 'MOUSE_RELATIVE';
+  dx: number; // Raw relative delta from pointer lock
+  dy: number;
+  timestamp: number;
+}
+
+export interface GamepadButtonState {
+  pressed: boolean;
+  touched?: boolean;
+  value: number; // 0.0 to 1.0 (analog trigger pull)
+}
+
+export interface GamepadStatePayload {
+  type: 'GAMEPAD_STATE';
+  playerIndex: number; // 0 = Player 1, 1 = Player 2
+  id: string; // Gamepad device name
+  buttons: GamepadButtonState[]; // 17 standard W3C buttons: A, B, X, Y, LB, RB, LT, RT, Select, Start, L3, R3, Up, Down, Left, Right, Guide
+  axes: number[]; // [LeftStickX, LeftStickY, RightStickX, RightStickY] (-1.0 to 1.0)
+  timestamp: number;
+}
+
+export interface Player2KeymapConfig {
+  up: string;
+  down: string;
+  left: string;
+  right: string;
+  a: string;
+  b: string;
+  x: string;
+  y: string;
+  lb: string;
+  rb: string;
+  lt: string;
+  rt: string;
+  select: string;
+  start: string;
+}
+
+export interface VigemStatus {
+  supported: boolean;
+  driverInstalled: boolean;
+  controllerPlugged: boolean;
+}
+
+export interface X360Report {
+  buttons: number;
+  leftTrigger: number;
+  rightTrigger: number;
+  thumbLx: number;
+  thumbLy: number;
+  thumbRx: number;
+  thumbRy: number;
+}
+
 export interface RemoteKeyboardPayload {
   type: 'KEY_DOWN' | 'KEY_UP';
   key: string;      // standard KeyboardEvent.key
@@ -193,7 +248,7 @@ export interface PinAuthResponsePayload {
 }
 
 export interface StreamQualityProfile {
-  id: 'performance' | 'clarity' | 'bandwidth';
+  id: 'performance' | 'clarity' | 'bandwidth' | 'gaming_ultra';
   label: string;
   resolution: { width: number; height: number };
   targetFps: number;
@@ -204,9 +259,11 @@ export interface StreamQualityProfile {
 
 export type RemoteControlPacket =
   | RemoteMouseMovePayload
+  | RemoteMouseRelativePayload
   | RemoteMouseButtonPayload
   | RemoteMouseWheelPayload
   | RemoteKeyboardPayload
+  | GamepadStatePayload
   | PermissionRequestPayload
   | PermissionResponsePayload
   | KillSwitchPayload

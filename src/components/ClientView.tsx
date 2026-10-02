@@ -20,6 +20,8 @@ import {
   WifiOff,
   Search,
   Loader2,
+  Smartphone,
+  Crosshair,
 } from 'lucide-react';
 import { useWebRTC, getDefaultSignalUrl } from '../hooks/useWebRTC';
 import { calculateRemoteCoordinates, BoundingBox } from '../utils/coordinateMath';
@@ -60,6 +62,29 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
   const [isControlLocked, setIsControlLocked] = useState<boolean>(true);
   const [showCoordinateHUD, setShowCoordinateHUD] = useState<boolean>(false);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  const [showMobileToolbar, setShowMobileToolbar] = useState<boolean>(true);
+  const [quickTextInput, setQuickTextInput] = useState<string>('');
+  const [isPointerLocked, setIsPointerLocked] = useState<boolean>(false);
+
+  const touchStateRef = useRef<{
+    startX: number;
+    startY: number;
+    startTime: number;
+    lastX: number;
+    lastY: number;
+    isTwoFinger: boolean;
+    lastTwoFingerY: number;
+    hasMoved: boolean;
+  }>({
+    startX: 0,
+    startY: 0,
+    startTime: 0,
+    lastX: 0,
+    lastY: 0,
+    isTwoFinger: false,
+    lastTwoFingerY: 0,
+    hasMoved: false,
+  });
 
   // Host Emergency Panic Alert
   const [panicAlert, setPanicAlert] = useState<string | null>(null);
@@ -119,6 +144,7 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
     const candidates = [
       'http://localhost:4000',
       'http://127.0.0.1:4000',
+      'http://100.101.215.94:4000',
       'http://192.168.31.217:4000',
       'http://192.168.1.50:4000',
       'http://192.168.1.100:4000',
@@ -173,6 +199,7 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
     joinRoom,
     leaveRoom,
     sendMousePacket,
+    sendMouseRelativePacket,
     sendEventPacket,
     getDataChannelBufferedAmount,
   } = useWebRTC({
@@ -351,10 +378,50 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
     };
   }, []);
 
+  // Toggle FPS Pointer Lock for 3D/Gaming
+  const togglePointerLock = useCallback(() => {
+    const el = videoElementRef.current || containerRef.current;
+    if (!el) return;
+    if (document.pointerLockElement) {
+      document.exitPointerLock();
+      setIsPointerLocked(false);
+    } else {
+      el.requestPointerLock();
+      setIsPointerLocked(true);
+      showToast({
+        title: 'FPS Pointer Lock Active',
+        description: 'Mouse captured for 3D/FPS gaming. Press ESC to unlock.',
+        type: 'info',
+      });
+    }
+  }, [showToast]);
+
+  useEffect(() => {
+    const onLockChange = () => {
+      setIsPointerLocked(!!document.pointerLockElement);
+    };
+    document.addEventListener('pointerlockchange', onLockChange);
+    return () => {
+      document.removeEventListener('pointerlockchange', onLockChange);
+    };
+  }, []);
+
   // 1. Mouse Move Pipeline
   const handleMouseMove = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       if (!isControlLocked || annotationMode !== 'remote') return;
+
+      // In FPS Pointer Lock Mode: dispatch raw relative movement
+      if (document.pointerLockElement) {
+        sendMouseRelativePacket({
+          type: 'MOUSE_RELATIVE',
+          dx: e.movementX,
+          dy: e.movementY,
+          timestamp: Date.now(),
+        });
+        return;
+      }
+
       const bbox = getVideoBoundingBox();
       if (!bbox) return;
 
@@ -382,7 +449,7 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
         sendMousePacket(packet);
       }
     },
-    [annotationMode, getVideoBoundingBox, hostMetadata, isControlLocked, sendMousePacket, showCoordinateHUD]
+    [annotationMode, getVideoBoundingBox, hostMetadata, isControlLocked, sendMousePacket, sendMouseRelativePacket, showCoordinateHUD]
   );
 
   // 2. Mouse Down Pipeline
@@ -519,6 +586,246 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
       sendEventPacket(packet);
     },
     [annotationMode, isControlLocked, sendEventPacket]
+  );
+
+  // 7. Touch Events Pipeline for Mobile / Tablet clients
+  const handleTouchStart = useCallback(
+    (e: React.TouchEvent<HTMLDivElement>) => {
+      if (!isControlLocked || annotationMode !== 'remote') return;
+      const bbox = getVideoBoundingBox();
+      if (!bbox) return;
+
+      if (e.touches.length === 1) {
+        const t = e.touches[0];
+        touchStateRef.current = {
+          startX: t.clientX,
+          startY: t.clientY,
+          startTime: Date.now(),
+          lastX: t.clientX,
+          lastY: t.clientY,
+          isTwoFinger: false,
+          lastTwoFingerY: 0,
+          hasMoved: false,
+        };
+
+        const result = calculateRemoteCoordinates(t.clientX, t.clientY, bbox, hostMetadata);
+        lastCoordResultRef.current = result;
+        if (!result.isOutOfBounds) {
+          sendMousePacket({
+            type: 'MOUSE_MOVE',
+            normX: result.normalizedX,
+            normY: result.normalizedY,
+            timestamp: Date.now(),
+          });
+        }
+      } else if (e.touches.length === 2) {
+        const t1 = e.touches[0];
+        const t2 = e.touches[1];
+        touchStateRef.current.isTwoFinger = true;
+        touchStateRef.current.lastTwoFingerY = (t1.clientY + t2.clientY) / 2;
+        touchStateRef.current.startTime = Date.now();
+      }
+    },
+    [annotationMode, getVideoBoundingBox, hostMetadata, isControlLocked, sendMousePacket]
+  );
+
+  const handleTouchMove = useCallback(
+    (e: React.TouchEvent<HTMLDivElement>) => {
+      if (!isControlLocked || annotationMode !== 'remote') return;
+      const bbox = getVideoBoundingBox();
+      if (!bbox) return;
+
+      if (e.touches.length === 1 && !touchStateRef.current.isTwoFinger) {
+        const t = e.touches[0];
+        const dx = t.clientX - touchStateRef.current.startX;
+        const dy = t.clientY - touchStateRef.current.startY;
+        if (Math.hypot(dx, dy) > 6) {
+          touchStateRef.current.hasMoved = true;
+        }
+        touchStateRef.current.lastX = t.clientX;
+        touchStateRef.current.lastY = t.clientY;
+
+        const result = calculateRemoteCoordinates(t.clientX, t.clientY, bbox, hostMetadata);
+        lastCoordResultRef.current = result;
+        if (!result.isOutOfBounds) {
+          sendMousePacket({
+            type: 'MOUSE_MOVE',
+            normX: result.normalizedX,
+            normY: result.normalizedY,
+            timestamp: Date.now(),
+          });
+        }
+      } else if (e.touches.length === 2) {
+        const t1 = e.touches[0];
+        const t2 = e.touches[1];
+        const currentY = (t1.clientY + t2.clientY) / 2;
+        const deltaY = (touchStateRef.current.lastTwoFingerY - currentY) * 2.5;
+        touchStateRef.current.lastTwoFingerY = currentY;
+        touchStateRef.current.hasMoved = true;
+
+        sendEventPacket({
+          type: 'MOUSE_WHEEL',
+          deltaX: 0,
+          deltaY: Math.round(deltaY),
+          timestamp: Date.now(),
+        });
+      }
+    },
+    [annotationMode, getVideoBoundingBox, hostMetadata, isControlLocked, sendEventPacket, sendMousePacket]
+  );
+
+  const handleTouchEnd = useCallback(
+    (_e: React.TouchEvent<HTMLDivElement>) => {
+      if (!isControlLocked || annotationMode !== 'remote') return;
+      const bbox = getVideoBoundingBox();
+      if (!bbox) return;
+
+      const st = touchStateRef.current;
+      const duration = Date.now() - st.startTime;
+
+      if (st.isTwoFinger) {
+        if (!st.hasMoved && duration < 500) {
+          const result = calculateRemoteCoordinates(st.lastX, st.lastY, bbox, hostMetadata);
+          if (!result.isOutOfBounds) {
+            sendEventPacket({
+              type: 'MOUSE_DOWN',
+              button: 'right',
+              normX: result.normalizedX,
+              normY: result.normalizedY,
+              clicks: 1,
+              timestamp: Date.now(),
+            });
+            setTimeout(() => {
+              sendEventPacket({
+                type: 'MOUSE_UP',
+                button: 'right',
+                normX: result.normalizedX,
+                normY: result.normalizedY,
+                timestamp: Date.now(),
+              });
+            }, 30);
+          }
+        }
+        return;
+      }
+
+      if (!st.hasMoved && duration < 350) {
+        // Tap -> Left click
+        const result = calculateRemoteCoordinates(st.lastX, st.lastY, bbox, hostMetadata);
+        if (!result.isOutOfBounds) {
+          sendEventPacket({
+            type: 'MOUSE_DOWN',
+            button: 'left',
+            normX: result.normalizedX,
+            normY: result.normalizedY,
+            clicks: 1,
+            timestamp: Date.now(),
+          });
+          setTimeout(() => {
+            sendEventPacket({
+              type: 'MOUSE_UP',
+              button: 'left',
+              normX: result.normalizedX,
+              normY: result.normalizedY,
+              timestamp: Date.now(),
+            });
+          }, 30);
+        }
+      } else if (!st.hasMoved && duration >= 500) {
+        // Long press -> Right click
+        const result = calculateRemoteCoordinates(st.lastX, st.lastY, bbox, hostMetadata);
+        if (!result.isOutOfBounds) {
+          sendEventPacket({
+            type: 'MOUSE_DOWN',
+            button: 'right',
+            normX: result.normalizedX,
+            normY: result.normalizedY,
+            clicks: 1,
+            timestamp: Date.now(),
+          });
+          setTimeout(() => {
+            sendEventPacket({
+              type: 'MOUSE_UP',
+              button: 'right',
+              normX: result.normalizedX,
+              normY: result.normalizedY,
+              timestamp: Date.now(),
+            });
+          }, 30);
+        }
+      }
+    },
+    [annotationMode, getVideoBoundingBox, hostMetadata, isControlLocked, sendEventPacket]
+  );
+
+  // Virtual mouse & keyboard actions for mobile toolbar
+  const handleVirtualClick = useCallback(
+    (button: RemoteMouseButton, clicks: number = 1) => {
+      const normX = lastCoordResultRef.current?.normalizedX ?? 0.5;
+      const normY = lastCoordResultRef.current?.normalizedY ?? 0.5;
+      sendEventPacket({
+        type: 'MOUSE_DOWN',
+        button,
+        normX,
+        normY,
+        clicks,
+        timestamp: Date.now(),
+      });
+      setTimeout(() => {
+        sendEventPacket({
+          type: 'MOUSE_UP',
+          button,
+          normX,
+          normY,
+          timestamp: Date.now(),
+        });
+      }, 40);
+    },
+    [sendEventPacket]
+  );
+
+  const handleVirtualKey = useCallback(
+    (key: string, code: string, modifiers: { ctrl?: boolean; alt?: boolean; shift?: boolean; meta?: boolean } = {}) => {
+      sendEventPacket({
+        type: 'KEY_DOWN',
+        key,
+        code,
+        ctrlKey: !!modifiers.ctrl,
+        altKey: !!modifiers.alt,
+        shiftKey: !!modifiers.shift,
+        metaKey: !!modifiers.meta,
+        timestamp: Date.now(),
+      });
+      setTimeout(() => {
+        sendEventPacket({
+          type: 'KEY_UP',
+          key,
+          code,
+          ctrlKey: !!modifiers.ctrl,
+          altKey: !!modifiers.alt,
+          shiftKey: !!modifiers.shift,
+          metaKey: !!modifiers.meta,
+          timestamp: Date.now(),
+        });
+      }, 40);
+    },
+    [sendEventPacket]
+  );
+
+  const handleQuickTextSubmit = useCallback(
+    (text: string) => {
+      manualSyncText(text);
+      setTimeout(() => {
+        handleVirtualKey('v', 'KeyV', { ctrl: true });
+        showToast({
+          title: 'Text Pasted to Host',
+          description: `Typed "${text.length > 25 ? text.slice(0, 25) + '...' : text}" onto Host`,
+          type: 'success',
+          duration: 3000,
+        });
+      }, 80);
+    },
+    [handleVirtualKey, manualSyncText, showToast]
   );
 
   // Toggle Fullscreen
@@ -773,6 +1080,20 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
                 </button>
 
                 <button
+                  id="toggle-pointer-lock-button"
+                  onClick={togglePointerLock}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-medium flex items-center gap-1.5 border transition-all ${
+                    isPointerLocked
+                      ? 'bg-cyan-500/25 border-cyan-400 text-cyan-200 shadow-[0_0_12px_rgba(6,182,212,0.25)]'
+                      : 'bg-slate-800 border-slate-700 text-slate-400'
+                  }`}
+                  title="Capture Mouse for 3D/FPS Gaming (Relative movement, ESC to release)"
+                >
+                  <Crosshair className="w-3.5 h-3.5" />
+                  <span>{isPointerLocked ? 'FPS Locked' : 'FPS Lock'}</span>
+                </button>
+
+                <button
                   id="toggle-hud-button"
                   onClick={() => setShowCoordinateHUD(!showCoordinateHUD)}
                   className={`px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors ${
@@ -807,7 +1128,11 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
               onWheel={handleWheel}
               onKeyDown={handleKeyDown}
               onKeyUp={handleKeyUp}
-              className={`relative aspect-video w-full rounded-xl overflow-hidden bg-[#04060a] border border-cyan-500/30 shadow-2xl flex items-center justify-center select-none outline-none ${
+              onTouchStart={handleTouchStart}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
+              onTouchCancel={handleTouchEnd}
+              className={`relative aspect-video w-full rounded-xl overflow-hidden bg-[#04060a] border border-cyan-500/30 shadow-2xl flex items-center justify-center select-none outline-none touch-none ${
                 isControlLocked && annotationMode === 'remote' ? 'cursor-default' : ''
               }`}
             >
@@ -859,6 +1184,176 @@ export const ClientView: React.FC<ClientViewProps> = ({ initialRoomId, initialPi
                 </div>
               )}
             </div>
+
+            {/* Mobile & Touch Virtual Control Toolbar */}
+            {isJoined && (
+              <div className="bg-[#0c0e18]/90 border border-cyan-500/20 rounded-xl p-3 space-y-2.5 shadow-lg backdrop-blur-md">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-2 text-xs font-semibold text-cyan-300">
+                    <Smartphone className="w-3.5 h-3.5 text-cyan-400" />
+                    <span>Mobile & Touch Controls</span>
+                    <span className="text-[10px] text-slate-400 font-mono hidden sm:inline">(Tap = Click, Long Press / 2-Finger = Right Click, 2-Finger Drag = Scroll)</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowMobileToolbar(!showMobileToolbar)}
+                    className="text-[11px] text-slate-400 hover:text-cyan-300 transition-colors cursor-pointer"
+                  >
+                    {showMobileToolbar ? 'Hide Controls' : 'Show Controls'}
+                  </button>
+                </div>
+
+                {showMobileToolbar && (
+                  <div className="space-y-2 pt-1 border-t border-cyan-500/10">
+                    {/* Click & Key Actions Bar */}
+                    <div className="flex flex-wrap items-center gap-1.5 text-xs font-mono">
+                      <button
+                        type="button"
+                        onClick={() => handleVirtualClick('left')}
+                        className="px-2.5 py-1 rounded bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-200 border border-cyan-500/40 text-xs font-bold active:scale-95 transition-all cursor-pointer"
+                        title="Send Left Click"
+                      >
+                        L-Click
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleVirtualClick('right')}
+                        className="px-2.5 py-1 rounded bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-200 border border-indigo-500/40 text-xs font-bold active:scale-95 transition-all cursor-pointer"
+                        title="Send Right Click"
+                      >
+                        R-Click
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleVirtualClick('left', 2)}
+                        className="px-2.5 py-1 rounded bg-cyan-600/20 hover:bg-cyan-600/30 text-cyan-200 border border-cyan-600/40 text-xs font-bold active:scale-95 transition-all cursor-pointer"
+                        title="Send Double Click"
+                      >
+                        2x Click
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => sendEventPacket({ type: 'MOUSE_WHEEL', deltaX: 0, deltaY: -120, timestamp: Date.now() })}
+                        className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-bold active:scale-95 transition-all cursor-pointer"
+                        title="Scroll Up"
+                      >
+                        Scroll ▲
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => sendEventPacket({ type: 'MOUSE_WHEEL', deltaX: 0, deltaY: 120, timestamp: Date.now() })}
+                        className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-bold active:scale-95 transition-all cursor-pointer"
+                        title="Scroll Down"
+                      >
+                        Scroll ▼
+                      </button>
+
+                      <span className="w-px h-4 bg-slate-700 mx-0.5" />
+
+                      <button
+                        type="button"
+                        onClick={() => handleVirtualKey('Escape', 'Escape')}
+                        className="px-2 py-1 rounded bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 border border-rose-500/30 text-xs font-bold active:scale-95 transition-all cursor-pointer"
+                      >
+                        Esc
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleVirtualKey('Tab', 'Tab')}
+                        className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-bold active:scale-95 transition-all cursor-pointer"
+                      >
+                        Tab
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleVirtualKey('Enter', 'Enter')}
+                        className="px-2.5 py-1 rounded bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-200 border border-emerald-500/40 text-xs font-bold active:scale-95 transition-all cursor-pointer"
+                      >
+                        Enter ↵
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleVirtualKey('Backspace', 'Backspace')}
+                        className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-bold active:scale-95 transition-all cursor-pointer"
+                      >
+                        Bksp ⌫
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleVirtualKey('Meta', 'MetaLeft')}
+                        className="px-2 py-1 rounded bg-blue-500/20 hover:bg-blue-500/30 text-blue-200 border border-blue-500/30 text-xs font-bold active:scale-95 transition-all cursor-pointer"
+                        title="Windows Key"
+                      >
+                        Win ⊞
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleVirtualKey('v', 'KeyV', { ctrl: true })}
+                        className="px-2 py-1 rounded bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-300 border border-cyan-500/30 text-xs font-bold active:scale-95 transition-all cursor-pointer"
+                        title="Ctrl+V (Paste)"
+                      >
+                        Ctrl+V
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleVirtualKey('c', 'KeyC', { ctrl: true })}
+                        className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-bold active:scale-95 transition-all cursor-pointer"
+                        title="Ctrl+C (Copy)"
+                      >
+                        Ctrl+C
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleVirtualKey(' ', 'Space')}
+                        className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-bold active:scale-95 transition-all cursor-pointer"
+                      >
+                        Space
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleVirtualKey('ArrowUp', 'ArrowUp')}
+                        className="px-1.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-bold active:scale-95 transition-all cursor-pointer"
+                      >
+                        ▲
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleVirtualKey('ArrowDown', 'ArrowDown')}
+                        className="px-1.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-bold active:scale-95 transition-all cursor-pointer"
+                      >
+                        ▼
+                      </button>
+                    </div>
+
+                    {/* Quick Send Text Input for Phones */}
+                    <form
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        if (!quickTextInput) return;
+                        handleQuickTextSubmit(quickTextInput);
+                        setQuickTextInput('');
+                      }}
+                      className="flex gap-2 items-center"
+                    >
+                      <input
+                        type="text"
+                        placeholder="Type text or command to paste onto Host PC..."
+                        value={quickTextInput}
+                        onChange={(e) => setQuickTextInput(e.target.value)}
+                        className="flex-1 bg-[#05060b] border border-cyan-500/30 rounded px-2.5 py-1.5 text-slate-200 text-xs font-mono focus:outline-none focus:border-cyan-400"
+                      />
+                      <button
+                        type="submit"
+                        className="px-3 py-1.5 rounded bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 text-xs font-medium flex items-center gap-1 shrink-0 cursor-pointer"
+                      >
+                        <Send className="w-3.5 h-3.5" />
+                        <span>Type on PC</span>
+                      </button>
+                    </form>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Quality Preset Selection */}

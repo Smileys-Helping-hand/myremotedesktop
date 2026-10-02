@@ -378,6 +378,28 @@ fn installers_dir() -> Option<std::path::PathBuf> {
     if let Some(dir) = std::env::var_os("REMOTEDESK_INSTALLERS_DIR") {
         return Some(std::path::PathBuf::from(dir));
     }
+    // Check next to running executable (installed package)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let p = parent.join("installers");
+            if p.is_dir() {
+                return Some(p);
+            }
+        }
+    }
+    // Check current working directory and parent (development / repository root)
+    if let Ok(cwd) = std::env::current_dir() {
+        let p = cwd.join("installers");
+        if p.is_dir() {
+            return Some(p);
+        }
+        if let Some(parent) = cwd.parent() {
+            let p = parent.join("installers");
+            if p.is_dir() {
+                return Some(p);
+            }
+        }
+    }
     let exe = std::env::current_exe().ok()?;
     Some(exe.parent()?.join("installers"))
 }
@@ -464,10 +486,13 @@ fn list_installers() -> Vec<Value> {
 /// regardless of which server answered.
 async fn downloads() -> impl IntoResponse {
     let assets = list_installers();
-    let version = assets
+    let mut versions: Vec<String> = assets
         .iter()
         .filter_map(|a| a.get("file").and_then(Value::as_str))
-        .find_map(version_from_filename);
+        .filter_map(version_from_filename)
+        .collect();
+    versions.sort_by(|a, b| b.cmp(a));
+    let version = versions.into_iter().next();
 
     Json(json!({
         "version": version,

@@ -57,6 +57,9 @@ enigo = { version = "0.6", features = ["wayland"] }
 # to the exact version wry already links so there is one webkit2gtk in the graph.
 webkit2gtk = { version = "=2.0.2", features = ["v2_38"] }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+vigem-client = "0.1.4"
+
 [profile.release]
 codegen-units = 1
 lto = true

@@ -3,6 +3,8 @@ import { io, Socket } from '../utils/signaling';
 import {
   RemoteControlPacket,
   RemoteMouseMovePayload,
+  RemoteMouseRelativePayload,
+  GamepadStatePayload,
 } from '../types/remoteControl';
 
 export interface WebRTCOptions {
@@ -14,6 +16,8 @@ export interface WebRTCOptions {
   pin?: string;
   onRemotePacket?: (packet: RemoteControlPacket) => void;
   onRemoteMouse?: (packet: RemoteMouseMovePayload) => void;
+  onRemoteMouseRelative?: (packet: RemoteMouseRelativePayload) => void;
+  onRemoteGamepad?: (packet: GamepadStatePayload) => void;
   iceServers?: RTCIceServer[];
 }
 
@@ -188,6 +192,8 @@ export function useWebRTC(options: WebRTCOptions = {}) {
     pin: initialPin,
     onRemotePacket,
     onRemoteMouse,
+    onRemoteMouseRelative,
+    onRemoteGamepad,
     iceServers = getCustomIceServers(),
   } = options;
 
@@ -223,6 +229,8 @@ export function useWebRTC(options: WebRTCOptions = {}) {
   const remotePeerIdRef = useRef<string | null>(null);
   const onRemotePacketRef = useRef(onRemotePacket);
   const onRemoteMouseRef = useRef(onRemoteMouse);
+  const onRemoteMouseRelativeRef = useRef(onRemoteMouseRelative);
+  const onRemoteGamepadRef = useRef(onRemoteGamepad);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const socketRef = useRef<Socket | null>(null);
   const mouseChannelRef = useRef<RTCDataChannel | null>(null);
@@ -262,6 +270,14 @@ export function useWebRTC(options: WebRTCOptions = {}) {
   useEffect(() => {
     onRemoteMouseRef.current = onRemoteMouse;
   }, [onRemoteMouse]);
+
+  useEffect(() => {
+    onRemoteMouseRelativeRef.current = onRemoteMouseRelative;
+  }, [onRemoteMouseRelative]);
+
+  useEffect(() => {
+    onRemoteGamepadRef.current = onRemoteGamepad;
+  }, [onRemoteGamepad]);
 
   // Sync localStream reference and update active peer connection tracks
   useEffect(() => {
@@ -413,6 +429,14 @@ export function useWebRTC(options: WebRTCOptions = {}) {
             if (onRemoteMouseRef.current) {
               onRemoteMouseRef.current(packet);
             }
+          } else if (packet.type === 'MOUSE_RELATIVE') {
+            if (onRemoteMouseRelativeRef.current) {
+              onRemoteMouseRelativeRef.current(packet);
+            }
+          } else if (packet.type === 'GAMEPAD_STATE') {
+            if (onRemoteGamepadRef.current) {
+              onRemoteGamepadRef.current(packet);
+            }
           } else {
             setLastReceivedEventPacket(packet);
           }
@@ -497,6 +521,21 @@ export function useWebRTC(options: WebRTCOptions = {}) {
 
       // Remote Track (Client receiving Host's screen)
       pc.ontrack = (event) => {
+        // Zero playout delay tuning for gaming
+        try {
+          const receiver = event.receiver;
+          if (receiver) {
+            if ('jitterBufferTarget' in receiver) {
+              (receiver as any).jitterBufferTarget = 0;
+            }
+            if ('playoutDelayHint' in receiver) {
+              (receiver as any).playoutDelayHint = 0;
+            }
+          }
+        } catch {
+          // ignore if receiver property not supported
+        }
+
         if (event.streams && event.streams[0]) {
           setRemoteStream(event.streams[0]);
           const videoTrack = event.streams[0].getVideoTracks()[0];
@@ -982,6 +1021,40 @@ export function useWebRTC(options: WebRTCOptions = {}) {
     return false;
   }, []);
 
+  // Send High-Frequency Relative Mouse Packet (Pointer Lock / FPS Gaming)
+  const sendMouseRelativePacket = useCallback((packet: RemoteMouseRelativePayload): boolean => {
+    const channel = mouseChannelRef.current;
+    if (channel && channel.readyState === 'open') {
+      try {
+        if (channel.bufferedAmount < 65536) {
+          channel.send(JSON.stringify(packet));
+          packetsSentRef.current += 1;
+          return true;
+        }
+      } catch (err) {
+        return false;
+      }
+    }
+    return false;
+  }, []);
+
+  // Send High-Frequency Gamepad Packet (UDP mode: un-ordered & zero retransmission delay)
+  const sendGamepadPacket = useCallback((packet: GamepadStatePayload): boolean => {
+    const channel = mouseChannelRef.current;
+    if (channel && channel.readyState === 'open') {
+      try {
+        if (channel.bufferedAmount < 65536) {
+          channel.send(JSON.stringify(packet));
+          packetsSentRef.current += 1;
+          return true;
+        }
+      } catch (err) {
+        return false;
+      }
+    }
+    return false;
+  }, []);
+
   // Send Critical Event Packet
   const sendEventPacket = useCallback((packet: RemoteControlPacket): boolean => {
     const channel = eventsChannelRef.current;
@@ -1020,6 +1093,8 @@ export function useWebRTC(options: WebRTCOptions = {}) {
     leaveRoom,
     severAllConnections,
     sendMousePacket,
+    sendMouseRelativePacket,
+    sendGamepadPacket,
     sendEventPacket,
     peerConnection: peerConnectionRef.current,
     getDataChannelBufferedAmount: () => eventsChannelRef.current?.bufferedAmount || 0,

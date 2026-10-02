@@ -444,8 +444,11 @@ function listInstallers() {
 
 app.get('/api/downloads', (_req, res) => {
   const assets = listInstallers();
-  const version =
-    assets.map((a) => a.file.match(/\d+\.\d+\.\d+/)?.[0]).find(Boolean) ?? null;
+  const versions = assets
+    .map((a) => a.file.match(/\d+\.\d+\.\d+/)?.[0])
+    .filter((v): v is string => Boolean(v))
+    .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+  const version = versions[0] ?? null;
   res.json({ version, assets, releasesUrl: RELEASES_URL });
 });
 

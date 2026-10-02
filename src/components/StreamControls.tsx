@@ -7,10 +7,20 @@ import {
   Monitor,
   Check,
   RefreshCw,
+  Gamepad2,
 } from 'lucide-react';
 import { StreamQualityProfile } from '../types/remoteControl';
 
 export const QUALITY_PROFILES: StreamQualityProfile[] = [
+  {
+    id: 'gaming_ultra',
+    label: 'Gaming Ultra (60 FPS)',
+    resolution: { width: 1920, height: 1080 },
+    targetFps: 60,
+    maxBitrateKbps: 25000,
+    contentHint: 'motion',
+    description: '1080p @ 60 FPS • Ultra-low jitter buffer & maintain-framerate CBR for co-op gaming',
+  },
   {
     id: 'performance',
     label: 'Performance (60 FPS)',
@@ -75,11 +85,17 @@ export const StreamControls: React.FC<StreamControlsProps> = ({
       </div>
 
       {/* Profile Selector Pills */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
         {QUALITY_PROFILES.map((profile) => {
           const isSelected = currentProfile === profile.id;
           const Icon =
-            profile.id === 'performance' ? Zap : profile.id === 'clarity' ? Sparkles : Wifi;
+            profile.id === 'gaming_ultra'
+              ? Gamepad2
+              : profile.id === 'performance'
+              ? Zap
+              : profile.id === 'clarity'
+              ? Sparkles
+              : Wifi;
 
           return (
             <button

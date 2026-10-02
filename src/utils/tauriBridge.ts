@@ -4,6 +4,7 @@
  */
 import { invoke } from '@tauri-apps/api/core';
 import { canControlHost, hostInvoke } from './hostControl';
+import type { VigemStatus, X360Report } from '../types/remoteControl';
 
 export interface DisplayInfo {
   id: string;
@@ -321,5 +322,55 @@ export async function tauriFirewallStatus(): Promise<FirewallStatus | null> {
   } catch (err) {
     console.warn('[Tauri] firewall_status error:', err);
     return null;
+  }
+}
+
+export async function tauriInjectMouseRelative(dx: number, dy: number): Promise<void> {
+  if (!canControlHost()) return;
+  try {
+    await hostInvoke('inject_mouse_relative', { dx: Math.round(dx), dy: Math.round(dy) }, true);
+  } catch {
+    // Fire-and-forget for FPS pointer lock moves
+  }
+}
+
+export async function tauriVigemStatus(): Promise<VigemStatus | null> {
+  if (!isTauri() && !canControlHost()) return null;
+  try {
+    return await hostInvoke<VigemStatus>('vigem_status');
+  } catch (err) {
+    console.warn('[host] vigem_status error:', err);
+    return null;
+  }
+}
+
+export async function tauriVigemPlugin(): Promise<boolean> {
+  if (!canControlHost()) return false;
+  try {
+    await hostInvoke('vigem_plugin');
+    return true;
+  } catch (err) {
+    console.warn('[host] vigem_plugin error:', err);
+    return false;
+  }
+}
+
+export async function tauriVigemUnplug(): Promise<boolean> {
+  if (!canControlHost()) return false;
+  try {
+    await hostInvoke('vigem_unplug');
+    return true;
+  } catch (err) {
+    console.warn('[host] vigem_unplug error:', err);
+    return false;
+  }
+}
+
+export async function tauriVigemUpdateX360(report: X360Report): Promise<void> {
+  if (!canControlHost()) return;
+  try {
+    await hostInvoke('vigem_update_x360', { report }, true);
+  } catch {
+    // Fire-and-forget for high frequency gamepad polling
   }
 }

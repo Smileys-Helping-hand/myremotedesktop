@@ -295,6 +295,22 @@ impl InputState {
         Ok(())
     }
 
+    /// Moves the mouse by relative pixel displacement (Pointer Lock / FPS mode).
+    pub fn move_mouse_relative(&self, dx: i32, dy: i32) -> Result<(), String> {
+        self.authorize()?;
+        if dx == 0 && dy == 0 {
+            return Ok(());
+        }
+        self.with_enigo(|e| {
+            e.move_mouse(dx, dy, Coordinate::Rel)
+                .map_err(|err| format!("relative move_mouse failed: {err}"))
+        })?;
+        if let Ok(loc) = self.with_enigo(|e| e.location().map_err(|err| err.to_string())) {
+            self.remember_injected(loc.0, loc.1);
+        }
+        Ok(())
+    }
+
     pub fn mouse_button(
         &self,
         button: &str,
